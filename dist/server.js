@@ -356,8 +356,13 @@ var defaultAtomicWriteOps = {
   syncDir: (dir, platform) => syncDirectory(dir, defaultDirOpenOps, platform),
   sleep: defaultSleep
 };
-var RENAME_ATTEMPTS = 3;
+var RENAME_ATTEMPTS = 10;
 var RENAME_RETRY_DELAY_MS = 20;
+var RENAME_RETRY_MAX_DELAY_MS = 500;
+function renameRetryDelayMs(attempt) {
+  const exponential = RENAME_RETRY_DELAY_MS * 2 ** Math.max(0, attempt - 1);
+  return Math.min(RENAME_RETRY_MAX_DELAY_MS, exponential);
+}
 async function renameWithRetry(ops, from, to) {
   let attempt = 0;
   for (;; ) {
@@ -368,8 +373,7 @@ async function renameWithRetry(ops, from, to) {
       attempt += 1;
       if (!isTransientRenameError(error, ops.platform) || attempt >= RENAME_ATTEMPTS)
         throw error;
-      const delay = RENAME_RETRY_DELAY_MS * attempt;
-      await ops.sleep(delay);
+      await ops.sleep(renameRetryDelayMs(attempt));
     }
   }
 }

@@ -478,7 +478,8 @@ var PendingAttemptSchema = Schema.Struct({
   delivered: Schema.Boolean,
   committed: Schema.Boolean,
   armNoProgress: Schema.Boolean,
-  previousLastContinuationAt: Schema.NullOr(Schema.Number)
+  previousLastContinuationAt: Schema.NullOr(Schema.Number),
+  previousLastContinuationAtMs: Schema.optionalWith(NullableNumber, { default: () => null })
 });
 var ShellDeferralSchema = Schema.Struct({
   shellID: Schema.String,
@@ -514,6 +515,7 @@ var GoalSchema = Schema.Struct({
   lastAccountedAt: NullableNumber,
   autoTurns: Schema.Number,
   lastContinuationAt: NullableNumber,
+  lastContinuationAtMs: Schema.optionalWith(NullableNumber, { default: () => null }),
   continuationFailures: Schema.optionalWith(Schema.Number, { default: () => 0 }),
   pendingAttempt: Schema.optionalWith(Schema.NullOr(PendingAttemptSchema), { default: () => null }),
   shellDeferrals: Schema.optionalWith(Schema.Array(ShellDeferralSchema), { default: () => [] }),
@@ -778,6 +780,7 @@ function normalizeGoal(goal) {
   goal.lastPromptAgent ??= null;
   goal.awaitingContinuationProgress = goal.awaitingContinuationProgress === true;
   goal.lastContinuationAt = typeof goal.lastContinuationAt === "number" && Number.isFinite(goal.lastContinuationAt) ? Math.floor(goal.lastContinuationAt >= 1000000000000 ? goal.lastContinuationAt / 1000 : goal.lastContinuationAt) : null;
+  goal.lastContinuationAtMs = typeof goal.lastContinuationAtMs === "number" && Number.isFinite(goal.lastContinuationAtMs) ? Math.floor(goal.lastContinuationAtMs) : null;
   goal.pendingAttempt = normalizePendingAttempt(goal.pendingAttempt);
   goal.shellDeferrals = (goal.shellDeferrals ?? []).filter((item) => typeof item.shellID === "string" && item.shellID.length > 0);
   goal.continuationBaselineMessageID ??= "";
@@ -825,7 +828,8 @@ function normalizePendingAttempt(attempt) {
     delivered: attempt.delivered === true,
     committed: attempt.committed === true,
     armNoProgress: attempt.armNoProgress !== false,
-    previousLastContinuationAt: typeof attempt.previousLastContinuationAt === "number" && Number.isFinite(attempt.previousLastContinuationAt) ? attempt.previousLastContinuationAt : null
+    previousLastContinuationAt: typeof attempt.previousLastContinuationAt === "number" && Number.isFinite(attempt.previousLastContinuationAt) ? attempt.previousLastContinuationAt : null,
+    previousLastContinuationAtMs: typeof attempt.previousLastContinuationAtMs === "number" && Number.isFinite(attempt.previousLastContinuationAtMs) ? attempt.previousLastContinuationAtMs : null
   };
 }
 function randomId() {
@@ -920,7 +924,12 @@ function snapshot(goal) {
   };
 }
 function snapshotInternal(goal) {
-  return { ...snapshot(goal), pendingAttempt: goal.pendingAttempt, shellDeferrals: goal.shellDeferrals };
+  return {
+    ...snapshot(goal),
+    pendingAttempt: goal.pendingAttempt,
+    shellDeferrals: goal.shellDeferrals,
+    lastContinuationAtMs: goal.lastContinuationAtMs
+  };
 }
 async function getGoal(sessionID) {
   const state = await readState();
@@ -1070,6 +1079,7 @@ function createGoalRecord(sessionID, objective, normalizedOptions, now = nowSeco
     lastAccountedAt: paused ? null : now,
     autoTurns: 0,
     lastContinuationAt: null,
+    lastContinuationAtMs: null,
     continuationFailures: 0,
     pendingAttempt: null,
     shellDeferrals: [],
@@ -1541,11 +1551,14 @@ async function reserveContinuation(sessionID, maxAutoTurns, minIntervalSeconds) 
     accountWallClock(goal, now);
     if (maybeStopForUsageLimit(goal, maxAutoTurns, now))
       return reserveWrapup(goal);
-    if (goal.lastContinuationAt && now - goal.lastContinuationAt < minIntervalSeconds)
+    const anchor = goal.lastContinuationAtMs ?? (goal.lastContinuationAt != null ? goal.lastContinuationAt * 1000 : null);
+    if (anchor != null && Date.now() - anchor < minIntervalSeconds * 1000)
       return null;
     goal.autoTurns += 1;
     const previousLastContinuationAt = goal.lastContinuationAt;
+    const previousLastContinuationAtMs = goal.lastContinuationAtMs;
     goal.lastContinuationAt = now;
+    goal.lastContinuationAtMs = Date.now();
     goal.continuationBaselineMessageID = goal.lastAssistantMessageID;
     goal.continuationBaselineSummary = summarizeText(goal.lastAssistantText);
     goal.continuationToolCalls = 0;
@@ -1556,7 +1569,8 @@ async function reserveContinuation(sessionID, maxAutoTurns, minIntervalSeconds) 
       delivered: false,
       committed: true,
       armNoProgress: true,
-      previousLastContinuationAt
+      previousLastContinuationAt,
+      previousLastContinuationAtMs
     };
     goal.awaitingContinuationProgress = false;
     goal.lastStatus = `Auto-continue ${goal.autoTurns} reserved.`;
@@ -1582,6 +1596,7 @@ async function rollbackContinuationAttempt(sessionID, expected) {
     }
     goal.autoTurns = Math.max(0, goal.autoTurns - 1);
     goal.lastContinuationAt = attempt.previousLastContinuationAt;
+    goal.lastContinuationAtMs = attempt.previousLastContinuationAtMs;
     goal.pendingAttempt = null;
     goal.awaitingContinuationProgress = false;
     goal.lastStatus = "Auto-continue attempt canceled before delivery.";
@@ -1596,8 +1611,12 @@ async function recordContinuationResult(sessionID, result, maxFailures, options)
       return goal ? snapshotInternal(goal) : null;
     if (options?.expectedGoalID && goal.id !== options.expectedGoalID)
       return null;
-    if (options?.expectedAttemptID && goal.pendingAttempt?.id !== options.expectedAttemptID)
+    if (options?.expectedAutoTurns != null && goal.autoTurns !== options.expectedAutoTurns)
       return null;
+    if (options?.expectedAttemptID && goal.pendingAttempt?.id !== options.expectedAttemptID) {
+      if (result !== "success" || goal.pendingAttempt != null || options.expectedAutoTurns == null)
+        return null;
+    }
     const now = nowSeconds();
     goal.updatedAt = now;
     if (result === "success") {
@@ -1617,9 +1636,10 @@ async function recordContinuationResult(sessionID, result, maxFailures, options)
             delivered: true,
             committed: false,
             armNoProgress: options?.armNoProgress !== false,
-            previousLastContinuationAt: goal.lastContinuationAt
+            previousLastContinuationAt: goal.lastContinuationAt,
+            previousLastContinuationAtMs: goal.lastContinuationAtMs
           };
-          if (goal.pendingAttempt.armNoProgress)
+          if (goal.pendingAttempt?.armNoProgress)
             goal.awaitingContinuationProgress = true;
         }
         goal.lastStatus = "Auto-continue prompt sent.";
@@ -2922,10 +2942,9 @@ function transportErrorMessageFromEvent(props) {
 function continuationRetryDelayMs(minIntervalSeconds, attemptAt, now = Date.now()) {
   return Math.max(0, attemptAt + minIntervalSeconds * 1000 - now) + RETRY_SETTLE_MS;
 }
-function continuationDelayFromSnapshot(minIntervalSeconds, lastContinuationAt, now = Date.now()) {
-  if (lastContinuationAt == null)
-    return RETRY_SETTLE_MS;
-  return Math.max(0, (lastContinuationAt + minIntervalSeconds + 1) * 1000 - now) + RETRY_SETTLE_MS;
+function continuationDelayFromSnapshot(minIntervalSeconds, goal, now = Date.now()) {
+  const anchor = goal.lastContinuationAtMs ?? (goal.lastContinuationAt != null ? goal.lastContinuationAt * 1000 : null);
+  return anchor == null ? RETRY_SETTLE_MS : continuationRetryDelayMs(minIntervalSeconds, anchor, now);
 }
 function pendingAttemptOf(goal) {
   return goal?.pendingAttempt ?? null;
@@ -4002,8 +4021,13 @@ var server = async ({ client }, options) => {
       if (!isCurrent() || nativeRetrySessions.has(sessionID))
         return;
       const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval);
-      if (!goal)
+      if (!goal) {
+        const waiting = await getGoalInternal(sessionID);
+        if (waiting?.status === "active" && waiting.lastContinuationAt != null && minInterval > 0 && !waiting.shellDeferrals.some((item) => !item.delivered)) {
+          scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, waiting), scheduled != null);
+        }
         return;
+      }
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now();
       attemptGoalID = goal.id;
       attemptID = goal.pendingAttempt?.id;
@@ -4025,7 +4049,9 @@ var server = async ({ client }, options) => {
         return;
       }
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
-        expectedGoalID: attemptGoalID
+        expectedGoalID: attemptGoalID,
+        expectedAttemptID: attemptID,
+        expectedAutoTurns: goal.autoTurns
       });
       if (isCurrent() && delivered?.pendingAttempt?.delivered)
         locallyDeliveredPendingSessions.add(sessionID);
@@ -4379,7 +4405,9 @@ var server = async ({ client }, options) => {
             const attempt = pendingAttemptOf(goal);
             if (attempt != null) {
               const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-                requirePending: true
+                requirePending: true,
+                expectedGoalID: goal.id,
+                expectedAttemptID: attempt.id
               });
               if (afterFailure)
                 locallyDeliveredPendingSessions.delete(sessionID);
@@ -4387,7 +4415,7 @@ var server = async ({ client }, options) => {
                 scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt), true, "retry");
               }
             } else if (autoContinue) {
-              scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, goal.lastContinuationAt), false, "recovery");
+              scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, goal), false, "recovery");
             }
           }
         }
@@ -4809,8 +4837,8 @@ async function setupV2(context) {
       const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval);
       if (!goal) {
         const waiting = await getGoalInternal(sessionID);
-        if (waiting?.status === "active" && waiting.pendingAttempt == null && waiting.lastContinuationAt != null && minInterval > 0) {
-          scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, waiting.lastContinuationAt), scheduled != null);
+        if (waiting?.status === "active" && waiting.lastContinuationAt != null && minInterval > 0 && !waiting.shellDeferrals.some((item) => !item.delivered)) {
+          scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, waiting), scheduled != null);
         }
         return;
       }
@@ -4834,7 +4862,9 @@ async function setupV2(context) {
         return;
       }
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
-        expectedGoalID: attemptGoalID
+        expectedGoalID: attemptGoalID,
+        expectedAttemptID: attemptID,
+        expectedAutoTurns: goal.autoTurns
       });
       if (isCurrent() && delivered?.pendingAttempt?.delivered)
         locallyDeliveredPendingSessions.add(sessionID);
@@ -5081,7 +5111,9 @@ async function setupV2(context) {
             const attempt = pendingAttemptOf(goal);
             if (attempt != null) {
               const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-                requirePending: true
+                requirePending: true,
+                expectedGoalID: goal.id,
+                expectedAttemptID: attempt.id
               });
               if (afterFailure)
                 locallyDeliveredPendingSessions.delete(sessionID);
@@ -5089,7 +5121,7 @@ async function setupV2(context) {
                 scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt), true, "retry");
               }
             } else if (autoContinue) {
-              scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, goal.lastContinuationAt), false, "recovery");
+              scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, goal), false, "recovery");
             }
           }
         }

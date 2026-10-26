@@ -601,11 +601,9 @@ function continuationRetryDelayMs(minIntervalSeconds: number, attemptAt: number,
   return Math.max(0, attemptAt + minIntervalSeconds * 1000 - now) + RETRY_SETTLE_MS
 }
 
-function continuationDelayFromSnapshot(minIntervalSeconds: number, lastContinuationAt: number | null, now = Date.now()) {
-  if (lastContinuationAt == null) return RETRY_SETTLE_MS
-  // lastContinuationAt is floor(seconds), so include the remainder of that
-  // second to guarantee reserveContinuation cannot wake too early and wedge.
-  return Math.max(0, (lastContinuationAt + minIntervalSeconds + 1) * 1000 - now) + RETRY_SETTLE_MS
+function continuationDelayFromSnapshot(minIntervalSeconds: number, goal: InternalGoalSnapshot, now = Date.now()) {
+  const anchor = goal.lastContinuationAtMs ?? (goal.lastContinuationAt != null ? goal.lastContinuationAt * 1000 : null)
+  return anchor == null ? RETRY_SETTLE_MS : continuationRetryDelayMs(minIntervalSeconds, anchor, now)
 }
 
 function pendingAttemptOf(goal: InternalGoalSnapshot | null): PendingAttempt | null {
@@ -1934,7 +1932,14 @@ const server: Plugin = async ({ client }, options?: Options) => {
       // Reserve (and persist) the attempt BEFORE delivery so a racing busy can
       // correlate to it. The attempt stays reserved until delivery or rollback.
       const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval)
-      if (!goal) return
+      if (!goal) {
+        const waiting = await getGoalInternal(sessionID)
+        if (waiting?.status === "active" && waiting.lastContinuationAt != null && minInterval > 0 &&
+          !waiting.shellDeferrals.some((item) => !item.delivered)) {
+          scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, waiting), scheduled != null)
+        }
+        return
+      }
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now()
       attemptGoalID = goal.id
       attemptID = goal.pendingAttempt?.id
@@ -1965,6 +1970,8 @@ const server: Plugin = async ({ client }, options?: Options) => {
       // marked it started (started=true is preserved).
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         expectedGoalID: attemptGoalID,
+        expectedAttemptID: attemptID,
+        expectedAutoTurns: goal.autoTurns,
       })
       if (isCurrent() && delivered?.pendingAttempt?.delivered) locallyDeliveredPendingSessions.add(sessionID)
       if (!delivered?.pendingAttempt?.delivered) {
@@ -2355,9 +2362,15 @@ const server: Plugin = async ({ client }, options?: Options) => {
             const attempt = pendingAttemptOf(goal)
             if (attempt != null) {
               // The pending attempt failed at the transport level: count one
-              // failure and retry at the remaining min interval.
+              // failure and retry at the remaining min interval. The attempt id
+              // is required: a fast execution can reserve a newer attempt
+              // between the read and this write, and an unconditional failure
+              // would clear that newer attempt and count a phantom failure
+              // toward the pause ceiling.
               const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
                 requirePending: true,
+                expectedGoalID: goal.id,
+                expectedAttemptID: attempt.id,
               })
               if (afterFailure) locallyDeliveredPendingSessions.delete(sessionID)
               if (autoContinue && afterFailure?.status === "active") {
@@ -2374,7 +2387,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
               // dedupe through the scheduled-continuation timer.
               scheduleSettledContinuation(
                 sessionID,
-                continuationDelayFromSnapshot(minInterval, goal.lastContinuationAt),
+                continuationDelayFromSnapshot(minInterval, goal),
                 false,
                 "recovery",
               )
@@ -2823,12 +2836,14 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (!goal) {
         // A fast execution can settle before the minimum interval expires.
         // There may be no further idle event, so retain a timed wake-up rather
-        // than dropping the only continuation signal.
+        // than dropping the only continuation signal. The wake-up reevaluates
+        // eligibility and pending-attempt state at the host's next idle boundary.
         const waiting = await getGoalInternal(sessionID)
-        if (waiting?.status === "active" && waiting.pendingAttempt == null && waiting.lastContinuationAt != null && minInterval > 0) {
+        if (waiting?.status === "active" && waiting.lastContinuationAt != null && minInterval > 0 &&
+          !waiting.shellDeferrals.some((item) => !item.delivered)) {
           scheduleSettledContinuation(
             sessionID,
-            continuationDelayFromSnapshot(minInterval, waiting.lastContinuationAt),
+            continuationDelayFromSnapshot(minInterval, waiting),
             scheduled != null,
           )
         }
@@ -2864,6 +2879,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       // here would refund an accepted prompt and allow a duplicate on idle.
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         expectedGoalID: attemptGoalID,
+        expectedAttemptID: attemptID,
+        expectedAutoTurns: goal.autoTurns,
       })
       if (isCurrent() && delivered?.pendingAttempt?.delivered) locallyDeliveredPendingSessions.add(sessionID)
       if (!delivered?.pendingAttempt?.delivered) {
@@ -3156,8 +3173,14 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal)
             if (attempt != null) {
+              // The attempt id is required: a fast execution can reserve a
+              // newer attempt between the read and this write, and an
+              // unconditional failure would clear that newer attempt and count
+              // a phantom failure toward the pause ceiling.
               const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
                 requirePending: true,
+                expectedGoalID: goal.id,
+                expectedAttemptID: attempt.id,
               })
               if (afterFailure) locallyDeliveredPendingSessions.delete(sessionID)
               if (autoContinue && afterFailure?.status === "active") {
@@ -3174,7 +3197,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
               // dedupe through the scheduled-continuation timer.
               scheduleSettledContinuation(
                 sessionID,
-                continuationDelayFromSnapshot(minInterval, goal.lastContinuationAt),
+                continuationDelayFromSnapshot(minInterval, goal),
                 false,
                 "recovery",
               )

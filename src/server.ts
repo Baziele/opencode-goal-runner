@@ -2530,7 +2530,26 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       else stoppedExecutions.add(sessionID)
     },
   }
+  let autonomyAvailable = true
   const registrations: Array<{ dispose(): Promise<void> }> = []
+  // A plugin that fails to register takes the whole location with it:
+  // OpenCode reports "Location plugins did not finish activating" and every
+  // command that needs that location fails. Each registration is therefore
+  // isolated, so a failure in one degrades the plugin instead of removing it.
+  async function registerSafely(
+    what: string,
+    register: () => Promise<{ dispose(): Promise<void> }>,
+    requiredForAutonomy = false,
+  ) {
+    try {
+      registrations.push(await register())
+      return true
+    } catch (error) {
+      if (requiredForAutonomy) autonomyAvailable = false
+      v2ErrorLog(`Failed to register ${what}${requiredForAutonomy ? "; autonomous continuation disabled" : ""}`, error)
+      return false
+    }
+  }
   let disposed = false
   let eventConsumerStopped = false
 
@@ -2577,11 +2596,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
 
   async function runTurnWatchdog(sessionID: string, watchdog: TurnWatchdog) {
     const epoch = continuationEpochs.current(sessionID)
-    const isCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const isCurrent = () => !disposed && autonomyAvailable && epoch === continuationEpochs.current(sessionID)
     let claimedContinuation = false
     let claimedGoalID: string | undefined
     try {
-      if (disposed) return
+      if (disposed || !autonomyAvailable) return
       await taskRecoveryComplete
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID) || watchdogRescuedSessions.has(sessionID))
         return
@@ -2689,7 +2708,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   }
 
   async function runAutoContinue(sessionID: string, fromTaskDeferral = false, scheduled?: ScheduledContinuation) {
-    if (disposed) return
+    if (disposed || !autonomyAvailable) return
     if (stoppedExecutions.has(sessionID)) return
     if (busySessions.has(sessionID) && !scheduled) {
       await rearmBusyContinuation(sessionID)
@@ -2700,7 +2719,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       return
     }
     const epoch = continuationEpochs.current(sessionID)
-    const isCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const isCurrent = () => !disposed && autonomyAvailable && epoch === continuationEpochs.current(sessionID)
     // Transcript recovery must settle before any continuation decision;
     // otherwise the first lifecycle event after a restart defers to a task
     // state that has not been rebuilt yet.
@@ -3361,9 +3380,15 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   }
 
   if (registerCommand) {
-    const existingCommands = new Set((await context.command.list()).data.map((command) => command.name))
-    registrations.push(
-      await context.command.transform((draft) => {
+    // Listing the existing commands is a read, but a host that cannot answer
+    // it must not stop the plugin from registering.
+    let existingCommands = new Set<string>()
+    try {
+      existingCommands = new Set((await context.command.list()).data.map((command) => command.name))
+    } catch (error) {
+      v2ErrorLog("Failed to list the existing commands", error)
+    }
+    await registerSafely("the goal command", () => context.command.transform((draft) => {
         const claimedCommands = new Set(existingCommands)
         for (const command of goalCommandDefinitions(commandName, locale)) {
           if (claimedCommands.has(command.name)) continue
@@ -3441,6 +3466,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                       disposed ||
                       stoppedExecutions.has(input.sessionID) ||
                       !autoContinue ||
+                      !autonomyAvailable ||
                       goal?.status !== "active"
                     )
                       break
@@ -3475,8 +3501,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     // Keep the auto-turn reset behind an explicit user resume request. The
     // status tool remains model-callable, but it cannot renew the safety limit
     // unless this prompt-admission boundary grants one single-use reset.
-    registrations.push(
-      await context.session.hook("prompt", async (input) => {
+    await registerSafely("the prompt hook", () => context.session.hook("prompt", async (input) => {
         // Prompt hooks only fire in the session's owning location.
         if (typeof input.sessionID === "string") markSessionOwnership(input.sessionID, true)
         explicitResumeRequests.delete(input.sessionID)
@@ -3503,6 +3528,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           explicitResumeRequests.add(input.sessionID)
         }
       }),
+      true,
     )
   }
 
@@ -3513,7 +3539,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       name: "interrupt",
       callback: (event: { sessionID: string }) => Promise<void>,
     ) => Promise<{ dispose(): Promise<void> }>
-    registrations.push(await hookInterrupt("interrupt", async ({ sessionID }) => {
+    await registerSafely("the interrupt hook", () => hookInterrupt("interrupt", async ({ sessionID }) => {
       markSessionOwnership(sessionID, true)
       goalServices.stopAutonomy?.(sessionID)
       try {
@@ -3526,14 +3552,15 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     // Host predates the explicit session interruption hook.
   }
 
-  registrations.push(
-    await context.tool.transform((draft) => {
+  await registerSafely("the goal tools", () => context.tool.transform((draft) => {
       for (const tool of goalToolsV2(goalServices)) draft.add(tool)
     }),
+    true,
   )
 
-  registrations.push(
-    await context.tool.hook("execute.before", async (input) => {
+  let tracksToolEnds = false
+  const tracksToolStarts = await registerSafely("the execute.before hook", () => context.tool.hook("execute.before", async (input) => {
+      if (!tracksToolEnds) return
       taskTracker.noteTaskCall({ tool: input.tool, sessionID: input.sessionID, callID: input.id })
       const sessionID = typeof input.sessionID === "string" ? input.sessionID : undefined
       // Tool execution only happens in the session's owning location.
@@ -3544,10 +3571,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         toolAttempts.set(toolAttemptKey(sessionID, callID), goal?.pendingAttempt?.id ?? null)
       }
     }),
+    true,
   )
 
-  registrations.push(
-    await context.tool.hook("execute.after", async (input) => {
+  tracksToolEnds = await registerSafely("the execute.after hook", () => context.tool.hook("execute.after", async (input) => {
       const sessionID = typeof input.sessionID === "string" ? input.sessionID : undefined
       const callID = typeof input.id === "string" ? input.id : undefined
       const attemptKey = sessionID && callID ? toolAttemptKey(sessionID, callID) : undefined
@@ -3574,7 +3601,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       // A successful tool output is real progress: it resolves any pending
       // continuation and clears the prompt-failure counter. This body is async
       // so recovery cancellation completes before any pending recovery timer.
-      if (!sessionID || typeof input.tool !== "string") return
+      if (!tracksToolStarts || !sessionID || typeof input.tool !== "string") return
       if (NON_PROGRESS_TOOLS.has(input.tool.toLowerCase())) return
       if (toolOutputFailed(input.result)) return
       const before = await getGoalInternal(sessionID)
@@ -3589,6 +3616,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         cancelScheduledContinuation(sessionID)
       }
     }),
+    true,
   )
 
   const reminder = systemReminder(locale, true)
@@ -3597,10 +3625,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     system.push({ type: "text", text: reminder })
   }
 
-  registrations.push(
-    await context.session.hook("context", (sessionContext) => {
+  await registerSafely("the context hook", () => context.session.hook("context", (sessionContext) => {
       ensureSystemReminder(sessionContext.system)
     }),
+    true,
   )
 
   // V2 equivalent of the V1 experimental.session.compacting hook: keep the
@@ -3614,8 +3642,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       name: "compaction",
       callback: (event: V2CompactionHookEvent) => Promise<void>,
     ) => Promise<{ dispose(): Promise<void> }>
-    registrations.push(
-      await hookCompaction("compaction", async (event) => {
+    await registerSafely("the compaction hook", () => hookCompaction("compaction", async (event) => {
         ensureSystemReminder(event.system)
         const goal = await getGoal(event.sessionID)
         if (!goal) return
@@ -3661,10 +3688,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   const abortController = new AbortController()
   let eventIterator: AsyncIterator<unknown> | undefined
   const consumer = (async () => {
-    const subscription = context.event.subscribe({ signal: abortController.signal })
-    const iterator = subscription[Symbol.asyncIterator]()
-    eventIterator = iterator
     try {
+      const subscription = context.event.subscribe({ signal: abortController.signal })
+      const iterator = subscription[Symbol.asyncIterator]()
+      eventIterator = iterator
       while (true) {
         const { done, value } = await iterator.next()
         if (done) break
@@ -3674,7 +3701,14 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     } catch (error) {
       if (!abortController.signal.aborted) v2ErrorLog("V2 event consumer stopped", error)
     } finally {
-      if (!disposed && !abortController.signal.aborted) eventConsumerStopped = true
+      if (!disposed && !abortController.signal.aborted) {
+        eventConsumerStopped = true
+        autonomyAvailable = false
+        for (const scheduled of scheduledContinuations.values()) clearTimeout(scheduled.timer)
+        scheduledContinuations.clear()
+        for (const watchdog of turnWatchdogs.values()) clearTimeout(watchdog.timer)
+        turnWatchdogs.clear()
+      }
     }
   })()
 
@@ -3693,7 +3727,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     toolAttempts.clear()
     explicitResumeRequests.clear()
     objectiveEdits.clear()
-    for (const registration of registrations) await registration.dispose()
+    for (const registration of registrations) {
+      try {
+        await registration.dispose()
+      } catch (error) {
+        v2ErrorLog("Failed to dispose a goal registration", error)
+      }
+    }
     // Best-effort termination of the event consumer. Never block plugin
     // unload on a stream that does not close promptly.
     const termination = Promise.allSettled([consumer, eventIterator?.return?.()])

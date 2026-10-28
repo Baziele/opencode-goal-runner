@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { z } from "zod"
 import {
+  OPEN_ATTEMPTS,
   RENAME_ATTEMPTS,
   RENAME_RETRY_DELAY_MS,
   RENAME_RETRY_MAX_DELAY_MS,
@@ -624,4 +625,70 @@ test("a non-transient rename error is never retried", async () => {
   expect(opsCalled()).toEqual(["open", "write", "sync", "close", "rename", "unlink"])
   expect(await readFile(file, "utf8")).toBe("old state")
   expect(await leftoverTmpFiles()).toEqual([])
+})
+
+for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+  test(`Windows temp creation recovers from ${code} without leftover files`, async () => {
+    let attempts = 0
+    const { ops } = makeRecordingOps({
+      ops: {
+        platform: "win32",
+        async open(path, flags, mode) {
+          if (++attempts < 4) throw errno(code, "temporarily unavailable")
+          return defaultAtomicWriteOps.open(path, flags, mode)
+        },
+      },
+    })
+    await atomicWriteFile(file, "payload", ops)
+    expect(attempts).toBe(4)
+    expect(await readFile(file, "utf8")).toBe("payload")
+    expect(await leftoverTmpFiles()).toEqual([])
+  })
+
+  test(`Windows temp creation exhausts ${code} and preserves existing JSON`, async () => {
+    await writeFile(file, DATA)
+    let attempts = 0
+    const { ops } = makeRecordingOps({
+      ops: {
+        platform: "win32",
+        async open() { attempts++; throw errno(code, "still unavailable") },
+      },
+    })
+    await expect(atomicWriteFile(file, "payload", ops)).rejects.toThrow("still unavailable")
+    expect(attempts).toBe(OPEN_ATTEMPTS)
+    expect(await readFile(file, "utf8")).toBe(DATA)
+    expect(await leftoverTmpFiles()).toEqual([])
+  })
+
+  test(`POSIX temp creation rejects ${code} immediately`, async () => {
+    let attempts = 0
+    const { ops } = makeRecordingOps({
+      ops: {
+        platform: "linux",
+        async open() { attempts++; throw errno(code, "unavailable") },
+      },
+    })
+    await expect(atomicWriteFile(file, DATA, ops)).rejects.toThrow("unavailable")
+    expect(attempts).toBe(1)
+    expect(await leftoverTmpFiles()).toEqual([])
+  })
+}
+
+test("a temp path collision preserves the other creator's file", async () => {
+  await writeFile(file, DATA)
+  let collision = ""
+  const { ops } = makeRecordingOps({
+    ops: {
+      platform: "win32",
+      async open(path, flags, mode) {
+        collision = path
+        await writeFile(path, "another writer", { flag: "wx" })
+        return defaultAtomicWriteOps.open(path, flags, mode)
+      },
+    },
+  })
+  await expect(atomicWriteFile(file, "replacement", ops)).rejects.toMatchObject({ code: "EEXIST" })
+  expect(await readFile(collision, "utf8")).toBe("another writer")
+  expect(await readFile(file, "utf8")).toBe(DATA)
+  expect(await leftoverTmpFiles()).toHaveLength(1)
 })

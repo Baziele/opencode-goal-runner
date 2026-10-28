@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto"
 import { readFileSync } from "node:fs"
-import { mkdir, readFile } from "node:fs/promises"
+import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { Data, Effect, Schema } from "effect-goal-state"
 import { atomicWriteFile } from "./atomic-write"
 import { reportPluginError } from "./diagnostics"
+import { withStateLock } from "./state-lock"
+import { readStateFile } from "./state-read"
 import { statePath } from "./state-path"
 import {
   applyGoalPlanOps,
@@ -481,17 +483,18 @@ function decodeState(value: unknown) {
 
 function readStateResultEffect(file = statePath()) {
   return Effect.tryPromise({
-    try: () => readFile(file, "utf8"),
+    try: () => readStateFile(file),
     catch: (cause) => new StateReadError({ cause }),
   }).pipe(
     Effect.flatMap((raw) =>
       Effect.try({
         try: () => parseStateText(raw, file),
         catch: (cause) => new StateDecodeError({ cause }),
-      }),
-    ),
-    Effect.flatMap(({ value, recoveryContent }) =>
-      decodeState(value).pipe(Effect.map((state) => ({ state, recoveryContent }))),
+      }).pipe(
+        Effect.flatMap(({ value, recoveryContent }) =>
+          decodeState(value).pipe(Effect.map((state) => ({ state, recoveryContent }))),
+        ),
+      ),
     ),
     Effect.catchAll((error) =>
       error._tag === "StateReadError" && isMissingStateFile(error.cause)
@@ -518,24 +521,17 @@ function quarantineStateEffect(file: string, content: string) {
   })
 }
 
-function verifyRecoverySourceEffect(file: string, expectedContent: string, quarantineFile: string) {
-  return Effect.promise(async () => {
-    try {
-      return (await readFile(file, "utf8")) === expectedContent
-    } catch (error) {
-      if (!isMissingStateFile(error)) {
-        try {
-          console.error(
-            `[opencode-goal-plugin] Could not re-read ${file} after preserving it at ${quarantineFile}; continuing recovery:`,
-            error instanceof Error ? error.message : String(error),
-          )
-        } catch {
-          // Diagnostics must never block state recovery.
-        }
-        reportPluginError(`Could not re-read ${file} after preserving it at ${quarantineFile}`, error)
+function verifyRecoverySourceEffect(file: string, expectedContent: string) {
+  return Effect.tryPromise({
+    try: async () => {
+      try {
+        return (await readStateFile(file)) === expectedContent
+      } catch (error) {
+        if (isMissingStateFile(error)) return true
+        throw error
       }
-      return true
-    }
+    },
+    catch: (cause) => new StateReadError({ cause }),
   })
 }
 
@@ -586,9 +582,9 @@ function enqueueMutation<T>(operation: () => Promise<T>) {
 }
 
 async function mutate<T>(fn: (state: State) => T | Promise<T>, shouldWrite: (result: T) => boolean = () => true) {
-  return enqueueMutation(() => {
+  return enqueueMutation(async () => {
     const file = statePath()
-    return Effect.runPromise(
+    return withStateLock(file, () => Effect.runPromise(
       Effect.gen(function* () {
         const { state, recoveryContent } = yield* readStateResultEffect(file)
         const result = yield* Effect.tryPromise({
@@ -615,7 +611,7 @@ async function mutate<T>(fn: (state: State) => T | Promise<T>, shouldWrite: (res
             reportPluginError(`Could not quarantine corrupt state at ${file}`, quarantine.error)
             notifyStateRecovery(notice)
           } else {
-            const unchanged = yield* verifyRecoverySourceEffect(file, recoveryContent, quarantine.quarantineFile)
+            const unchanged = yield* verifyRecoverySourceEffect(file, recoveryContent)
             if (!unchanged) {
               const message = "goal state changed while recovery was being quarantined; refusing to overwrite it"
               notifyStateRecovery({
@@ -643,7 +639,7 @@ async function mutate<T>(fn: (state: State) => T | Promise<T>, shouldWrite: (res
         if (recoveryContent != null || shouldWrite(result)) yield* writeStateEffect(state, file)
         return result
       }),
-    )
+    ))
   })
 }
 

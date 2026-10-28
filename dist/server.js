@@ -292,8 +292,8 @@ function goalPlanEntries(plan) {
 
 // src/state.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { mkdir, readFile } from "fs/promises";
-import { dirname as dirname3 } from "path";
+import { mkdir as mkdir2 } from "fs/promises";
+import { dirname as dirname4 } from "path";
 import { Data, Effect, Schema } from "effect-goal-state";
 
 // src/atomic-write.ts
@@ -304,11 +304,25 @@ function isUnsupportedSyncDirError(error, platform) {
   const code = error?.code;
   return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EISDIR" || platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBADF");
 }
-function isTransientRenameError(error, platform) {
+function isTransientWindowsFileError(error, platform) {
   if (platform !== "win32")
     return false;
   const code = error?.code;
   return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+var OPEN_ATTEMPTS = 10;
+async function openWithRetry(ops, path, flags, mode) {
+  let attempt = 0;
+  for (;; ) {
+    try {
+      return await ops.open(path, flags, mode);
+    } catch (error) {
+      attempt += 1;
+      if (!isTransientWindowsFileError(error, ops.platform) || attempt >= OPEN_ATTEMPTS)
+        throw error;
+      await ops.sleep(renameRetryDelayMs(attempt));
+    }
+  }
 }
 async function bestEffort(action) {
   try {
@@ -371,7 +385,7 @@ async function renameWithRetry(ops, from, to) {
       return;
     } catch (error) {
       attempt += 1;
-      if (!isTransientRenameError(error, ops.platform) || attempt >= RENAME_ATTEMPTS)
+      if (!isTransientWindowsFileError(error, ops.platform) || attempt >= RENAME_ATTEMPTS)
         throw error;
       await ops.sleep(renameRetryDelayMs(attempt));
     }
@@ -383,7 +397,7 @@ async function atomicWriteFile(file, data, ops = defaultAtomicWriteOps) {
   let created = false;
   let renamed = false;
   try {
-    handle = await ops.open(tmp, "wx", 384);
+    handle = await openWithRetry(ops, tmp, "wx", 384);
     created = true;
     await handle.write(data);
     await handle.sync();
@@ -499,6 +513,127 @@ function reportPluginError(message, error) {
       appendWithinBudget(path, line);
     }
   } catch {}
+}
+
+// src/state-lock.ts
+import { chmod as chmod2, lstat, mkdir, realpath } from "fs/promises";
+import { basename, dirname as dirname3, join as join3, resolve } from "path";
+import { setTimeout as sleep } from "timers/promises";
+async function openConnection(file) {
+  const specifier = process.versions.bun ? "bun:sqlite" : "node:sqlite";
+  if (process.versions.bun) {
+    const sqlite2 = await import(specifier);
+    return new sqlite2.Database(file);
+  }
+  const sqlite = await import(specifier);
+  return new sqlite.DatabaseSync(file);
+}
+function isBusy(error) {
+  if (typeof error !== "object" || error === null)
+    return false;
+  const code = "errcode" in error ? error.errcode : ("errno" in error) ? error.errno : undefined;
+  return typeof code === "number" && (code & 255) === 5;
+}
+async function validateCoordinator(file) {
+  try {
+    if (!(await lstat(file)).isFile())
+      throw new Error(`State coordinator must be a regular file: ${file}`);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
+      return;
+    throw error;
+  }
+}
+function closeConnection(connection, acquired) {
+  let failure;
+  try {
+    if (acquired)
+      connection.exec("ROLLBACK");
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    connection.close();
+  } catch (error) {
+    failure ??= error;
+  }
+  return failure;
+}
+async function withStateLock(stateFile, action) {
+  const file = resolve(stateFile);
+  await mkdir(dirname3(file), { recursive: true, mode: 448 });
+  const coordinator = join3(await realpath(dirname3(file)), `${basename(file)}.coord.sqlite`);
+  await validateCoordinator(coordinator);
+  const connection = await openConnection(coordinator);
+  let acquired = false;
+  let result;
+  try {
+    await validateCoordinator(coordinator);
+    await chmod2(coordinator, 384);
+    connection.exec("PRAGMA busy_timeout = 0");
+    const deadline = performance.now() + 1e4;
+    for (;; ) {
+      try {
+        connection.exec("BEGIN IMMEDIATE");
+        acquired = true;
+        break;
+      } catch (error) {
+        if (!isBusy(error))
+          throw error;
+        if (performance.now() >= deadline)
+          throw new Error(`Timed out waiting for goal state ownership: ${stateFile}`, { cause: error });
+        await sleep(20);
+      }
+    }
+    result = await action();
+  } catch (error) {
+    closeConnection(connection, acquired);
+    throw error;
+  }
+  const failure = closeConnection(connection, acquired);
+  if (failure !== undefined)
+    throw failure;
+  return result;
+}
+
+// src/state-read.ts
+import { readFile } from "fs/promises";
+var READ_ATTEMPTS = 5;
+var READ_RETRY_DELAY_MS = 10;
+var MISSING_READ_ATTEMPTS = 3;
+var MISSING_READ_RETRY_DELAY_MS = 2;
+var defaultStateReadOps = {
+  platform: process.platform,
+  readFile: (path) => readFile(path, "utf8"),
+  sleep: (ms) => new Promise((resolve2) => setTimeout(resolve2, ms))
+};
+function isTransientReadError(error, platform) {
+  const code = error?.code;
+  if (code === "ENOENT")
+    return true;
+  if (platform !== "win32")
+    return false;
+  return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+async function readStateFile(file, ops = defaultStateReadOps) {
+  let missingAttempts = 0;
+  for (let attempt = 1;; attempt++) {
+    try {
+      return await ops.readFile(file);
+    } catch (error) {
+      const code = error?.code;
+      if (code === "ENOENT") {
+        missingAttempts += 1;
+        if (missingAttempts >= MISSING_READ_ATTEMPTS)
+          throw error;
+        await ops.sleep(MISSING_READ_RETRY_DELAY_MS);
+        continue;
+      }
+      if (attempt >= READ_ATTEMPTS || !isTransientReadError(error, ops.platform))
+        throw error;
+      await ops.sleep(READ_RETRY_DELAY_MS);
+    }
+  }
 }
 
 // src/state.ts
@@ -708,12 +843,12 @@ function decodeState(value) {
 }
 function readStateResultEffect(file = statePath()) {
   return Effect.tryPromise({
-    try: () => readFile(file, "utf8"),
+    try: () => readStateFile(file),
     catch: (cause) => new StateReadError({ cause })
   }).pipe(Effect.flatMap((raw) => Effect.try({
     try: () => parseStateText(raw, file),
     catch: (cause) => new StateDecodeError({ cause })
-  })), Effect.flatMap(({ value, recoveryContent }) => decodeState(value).pipe(Effect.map((state) => ({ state, recoveryContent })))), Effect.catchAll((error) => error._tag === "StateReadError" && isMissingStateFile(error.cause) ? Effect.succeed({ state: emptyState(), recoveryContent: null }) : Effect.fail(error)));
+  }).pipe(Effect.flatMap(({ value, recoveryContent }) => decodeState(value).pipe(Effect.map((state) => ({ state, recoveryContent })))))), Effect.catchAll((error) => error._tag === "StateReadError" && isMissingStateFile(error.cause) ? Effect.succeed({ state: emptyState(), recoveryContent: null }) : Effect.fail(error)));
 }
 function readStateEffect(file = statePath()) {
   return readStateResultEffect(file).pipe(Effect.map(({ state }) => state));
@@ -722,7 +857,7 @@ function quarantineStateEffect(file, content) {
   return Effect.promise(async () => {
     const quarantineFile = `${file}.corrupt-${Date.now()}-${randomUUID2()}`;
     try {
-      await mkdir(dirname3(file), { recursive: true, mode: 448 });
+      await mkdir2(dirname4(file), { recursive: true, mode: 448 });
       await atomicWriteFile(quarantineFile, content);
       return { quarantineFile, error: null };
     } catch (error) {
@@ -730,25 +865,24 @@ function quarantineStateEffect(file, content) {
     }
   });
 }
-function verifyRecoverySourceEffect(file, expectedContent, quarantineFile) {
-  return Effect.promise(async () => {
-    try {
-      return await readFile(file, "utf8") === expectedContent;
-    } catch (error) {
-      if (!isMissingStateFile(error)) {
-        try {
-          console.error(`[opencode-goal-plugin] Could not re-read ${file} after preserving it at ${quarantineFile}; continuing recovery:`, error instanceof Error ? error.message : String(error));
-        } catch {}
-        reportPluginError(`Could not re-read ${file} after preserving it at ${quarantineFile}`, error);
+function verifyRecoverySourceEffect(file, expectedContent) {
+  return Effect.tryPromise({
+    try: async () => {
+      try {
+        return await readStateFile(file) === expectedContent;
+      } catch (error) {
+        if (isMissingStateFile(error))
+          return true;
+        throw error;
       }
-      return true;
-    }
+    },
+    catch: (cause) => new StateReadError({ cause })
   });
 }
 function writeStateEffect(state, file = statePath()) {
   return Effect.tryPromise({
     try: async () => {
-      await mkdir(dirname3(file), { recursive: true, mode: 448 });
+      await mkdir2(dirname4(file), { recursive: true, mode: 448 });
       await atomicWriteFile(file, JSON.stringify(state, null, 2) + `
 `);
     },
@@ -769,9 +903,9 @@ function enqueueMutation(operation) {
   return current;
 }
 async function mutate(fn, shouldWrite = () => true) {
-  return enqueueMutation(() => {
+  return enqueueMutation(async () => {
     const file = statePath();
-    return Effect.runPromise(Effect.gen(function* () {
+    return withStateLock(file, () => Effect.runPromise(Effect.gen(function* () {
       const { state, recoveryContent } = yield* readStateResultEffect(file);
       const result = yield* Effect.tryPromise({
         try: () => Promise.resolve(fn(state)),
@@ -792,7 +926,7 @@ async function mutate(fn, shouldWrite = () => true) {
           reportPluginError(`Could not quarantine corrupt state at ${file}`, quarantine.error);
           notifyStateRecovery(notice);
         } else {
-          const unchanged = yield* verifyRecoverySourceEffect(file, recoveryContent, quarantine.quarantineFile);
+          const unchanged = yield* verifyRecoverySourceEffect(file, recoveryContent);
           if (!unchanged) {
             const message = "goal state changed while recovery was being quarantined; refusing to overwrite it";
             notifyStateRecovery({
@@ -816,7 +950,7 @@ async function mutate(fn, shouldWrite = () => true) {
       if (recoveryContent != null || shouldWrite(result))
         yield* writeStateEffect(state, file);
       return result;
-    }));
+    })));
   });
 }
 var DEFAULT_MAX_OBJECTIVE_CHARS = 1e5;
@@ -2613,12 +2747,60 @@ var TASK_TERMINAL_STATES = new Set(["completed", "error", "cancelled"]);
 var activeContinuations = new Set;
 
 class ContinuationEpochs {
-  values = new Map;
+  sessions = new Map;
+  disposed = false;
+  control(sessionID) {
+    let control = this.sessions.get(sessionID);
+    if (!control) {
+      control = { epoch: 0, pending: 0 };
+      this.sessions.set(sessionID, control);
+    }
+    return control;
+  }
+  wake(control) {
+    control.changed?.resolve();
+    control.changed = undefined;
+  }
   current(sessionID) {
-    return this.values.get(sessionID) ?? 0;
+    return this.sessions.get(sessionID)?.epoch ?? 0;
   }
   invalidate(sessionID) {
-    this.values.set(sessionID, this.current(sessionID) + 1);
+    const control = this.control(sessionID);
+    control.epoch++;
+    this.wake(control);
+  }
+  async decidePause(sessionID, mutate2, commitStop) {
+    const control = this.control(sessionID);
+    control.pending++;
+    try {
+      const result = await mutate2();
+      if (!this.disposed)
+        commitStop();
+      return result;
+    } finally {
+      control.pending--;
+      this.wake(control);
+    }
+  }
+  hasPending(sessionID) {
+    return (this.sessions.get(sessionID)?.pending ?? 0) > 0;
+  }
+  async waitUntilSettled(sessionID, epoch) {
+    while (!this.disposed) {
+      const control = this.sessions.get(sessionID);
+      if ((control?.epoch ?? 0) !== epoch)
+        return false;
+      if (!control?.pending)
+        return true;
+      control.changed ??= Promise.withResolvers();
+      await control.changed.promise;
+    }
+    return false;
+  }
+  dispose() {
+    this.disposed = true;
+    for (const control of this.sessions.values())
+      this.wake(control);
   }
 }
 function isUserAbortEvent(event) {
@@ -3623,13 +3805,13 @@ function isClosedGoal(goal) {
   return goal.status === "complete" || goal.status === "unmet" || goal.status === "cancelled";
 }
 async function stopGoalFromTool(context, services) {
-  const goal = await cancelGoal(context.sessionID);
   services.stopAutonomy?.(context.sessionID);
+  const goal = await cancelGoal(context.sessionID);
   return JSON.stringify({ goal, cancelled: goal?.status === "cancelled" }, null, 2);
 }
 async function clearGoalFromTool(context, services) {
-  const cleared = await clearGoal(context.sessionID);
   services.stopAutonomy?.(context.sessionID);
+  const cleared = await clearGoal(context.sessionID);
   return JSON.stringify({ goal: null, cleared }, null, 2);
 }
 async function replaceGoalFromTool(input, context, services) {
@@ -3678,12 +3860,15 @@ async function updateGoalObjectiveFromTool(input, context, services) {
   const requested = input.status ?? "active";
   const planningOnly = requested === "active" && services.isPlanAgent(context.agent);
   const edit = services.consumeObjectiveEdit?.(context.sessionID, input.objective);
-  const goal = await updateGoalObjective(context.sessionID, edit?.objective ?? input.objective, planningOnly ? "paused" : requested, {
+  const objective = validateObjective(edit?.objective ?? input.objective, services.maxObjectiveChars);
+  const effectiveStatus = planningOnly ? "paused" : requested;
+  const mutate2 = () => updateGoalObjective(context.sessionID, objective, effectiveStatus, {
     agent: typeof context.agent === "string" ? context.agent : null,
     planModePause: planningOnly,
     maxObjectiveChars: services.maxObjectiveChars,
     requestedPlanEdit: edit
   });
+  const goal = effectiveStatus === "paused" ? await services.decidePause(context.sessionID, mutate2) : await mutate2();
   return JSON.stringify(planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal }, null, 2);
 }
 async function closeGoalFromTool(input, context, services) {
@@ -3708,12 +3893,13 @@ async function updateGoalStatusFromTool(input, context, services) {
   if (input.blocker && input.reason !== "awaiting_user") {
     throw new Error("blocker is only valid for an awaiting_user pause");
   }
-  const goal = await setGoalStatus(context.sessionID, input.status, typeof context.agent === "string" ? context.agent : null, {
+  const mutate2 = () => setGoalStatus(context.sessionID, input.status, typeof context.agent === "string" ? context.agent : null, {
     resetAutoTurnLimit: explicitResume,
     allowInterruptedResume: explicitResume,
     requireAwaitingUserResume: !explicitResume,
     awaitingUserBlocker: input.reason === "awaiting_user" ? input.blocker : undefined
   });
+  const goal = input.status === "paused" ? await services.decidePause(context.sessionID, mutate2) : await mutate2();
   return JSON.stringify({ goal }, null, 2);
 }
 function v2ObjectSchema(properties, required = []) {
@@ -3800,6 +3986,7 @@ var server = async ({ client }, options) => {
     isPlanAgent,
     maxObjectiveChars: objectiveChars,
     consumeExplicitResume: (sessionID) => explicitResumeRequests.delete(sessionID),
+    decidePause: (sessionID, mutate2) => continuationEpochs.decidePause(sessionID, mutate2, () => goalServices.stopAutonomy(sessionID)),
     consumeObjectiveEdit: (sessionID, objective) => {
       const edit = objectiveEdits.get(sessionID);
       if (!edit || edit.objective !== objective.trim() && escapeXmlText2(edit.objective) !== objective.trim())
@@ -3818,6 +4005,8 @@ var server = async ({ client }, options) => {
         restartAfterContinuation.add(sessionID);
       else
         restartAfterContinuation.delete(sessionID);
+      if (mode === "replace" && busySessions.has(sessionID))
+        armTurnWatchdog(sessionID);
     }
   };
   const stopStateRecoveryReporting = onStateRecovery(statePath(), async ({ stateFile, quarantineFile, outcome, error }) => {
@@ -3884,24 +4073,29 @@ var server = async ({ client }, options) => {
         return;
       const observedBeforeRescue = await recordAssistantMessage(sessionID, latestAssistant, options ?? {});
       await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, observedBeforeRescue.goal);
-      const taskStatus = await taskBlockStatus(sessionID);
-      if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID))
-        return;
-      if (taskStatus && taskStatus.blocked)
-        return;
-      const current = await getGoal(sessionID);
-      if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID))
-        return;
-      if (current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || activeContinuations.has(sessionID))
-        return;
-      turnWatchdogs.delete(sessionID);
-      activeContinuations.add(sessionID);
-      claimedContinuation = true;
-      claimedGoalID = current.id;
-      watchdogRescuedSessions.add(sessionID);
-      if (!isCurrent())
-        return;
-      await sendContinuation(client, sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestTurnAgent ?? null);
+      for (;; ) {
+        if (!await continuationEpochs.waitUntilSettled(sessionID, epoch) || !isCurrent())
+          return;
+        const deliveryAssistant = await fetchLatestAssistant(client, sessionID);
+        await taskBlockStatus(sessionID);
+        const current = await getGoalInternal(sessionID);
+        if (!isCurrent())
+          return;
+        if (continuationEpochs.hasPending(sessionID))
+          continue;
+        if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID) || nativeRetrySessions.has(sessionID) || watchdogRescuedSessions.has(sessionID) || activeContinuations.has(sessionID))
+          return;
+        const deliveryAgent = agentFromMessage(deliveryAssistant);
+        if (current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || isPlanAgent(deliveryAgent) || current.shellDeferrals.some((item) => !item.delivered) || deferWhileTasksActive && taskTracker.hasBlockingTasks(sessionID, maxTaskBlockMs))
+          return;
+        turnWatchdogs.delete(sessionID);
+        activeContinuations.add(sessionID);
+        claimedContinuation = true;
+        claimedGoalID = current.id;
+        watchdogRescuedSessions.add(sessionID);
+        await sendContinuation(client, sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? deliveryAgent ?? null);
+        break;
+      }
       if (!isCurrent())
         return;
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
@@ -4122,19 +4316,45 @@ var server = async ({ client }, options) => {
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now();
       attemptGoalID = goal.id;
       attemptID = goal.pendingAttempt?.id;
-      const beforeDelivery = await getGoalInternal(sessionID);
-      const busyBeforeDelivery = await scheduledSessionBusy(sessionID, scheduled);
-      if (!isCurrent() || !continuationStillReserved(goal, beforeDelivery) || busyBeforeDelivery || nativeRetrySessions.has(sessionID)) {
-        await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
-        if (isCurrent() && busyBeforeDelivery)
-          await rearmBusyContinuation(sessionID, scheduled);
-        return;
+      for (;; ) {
+        if (!await continuationEpochs.waitUntilSettled(sessionID, epoch) || !isCurrent()) {
+          await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+          return;
+        }
+        const deliveryAssistant = await fetchLatestAssistant(client, sessionID);
+        await taskBlockStatus(sessionID);
+        const busyBeforeDelivery = await scheduledSessionBusy(sessionID, scheduled);
+        const beforeDelivery = await getGoalInternal(sessionID);
+        if (!isCurrent()) {
+          await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+          return;
+        }
+        if (continuationEpochs.hasPending(sessionID))
+          continue;
+        const deliveryAgent = agentFromMessage(deliveryAssistant);
+        const taskBlocked = deferWhileTasksActive && taskTracker.hasBlockingTasks(sessionID, maxTaskBlockMs);
+        const taskRetryAt = taskTracker.nextSnapshotIdleRetryAt(sessionID);
+        const busy = busyBeforeDelivery || busySessions.has(sessionID);
+        const planRestricted = isPlanAgent(beforeDelivery?.lastPromptAgent) || isPlanAgent(deliveryAgent);
+        const ownsSchedule = !scheduled || scheduledContinuations.get(sessionID) === scheduled;
+        const reserved = continuationStillReserved(goal, beforeDelivery);
+        if (!beforeDelivery || !reserved || !ownsSchedule || busy || nativeRetrySessions.has(sessionID) || planRestricted || taskBlocked || beforeDelivery.shellDeferrals.some((item) => !item.delivered)) {
+          await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+          if (isCurrent() && reserved && ownsSchedule && !nativeRetrySessions.has(sessionID)) {
+            if (planRestricted)
+              await pauseGoalForPlanMode(sessionID);
+            else if (busy)
+              await rearmBusyContinuation(sessionID, scheduled);
+            else if (taskBlocked) {
+              taskDeferredSessions.add(sessionID);
+              scheduleSettledContinuation(sessionID, taskRetryAt != null ? taskRetryAt - Date.now() : TASK_BLOCK_RETRY_MS, scheduled != null || taskRetryAt != null);
+            }
+          }
+          return;
+        }
+        await sendContinuation(client, sessionID, beforeDelivery.status === "active" ? continuationPrompt(beforeDelivery, locale) : limitPrompt(beforeDelivery, locale), beforeDelivery.lastPromptAgent ?? deliveryAgent ?? null);
+        break;
       }
-      if (scheduled && scheduledContinuations.get(sessionID) !== scheduled) {
-        await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
-        return;
-      }
-      await sendContinuation(client, sessionID, goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale), goal.lastPromptAgent ?? latestTurnAgent ?? null);
       if (!isCurrent()) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         return;
@@ -4183,6 +4403,7 @@ var server = async ({ client }, options) => {
   return {
     async dispose() {
       disposed = true;
+      continuationEpochs.dispose();
       stopStateRecoveryReporting();
       for (const scheduled of scheduledContinuations.values())
         clearTimeout(scheduled.timer);
@@ -4348,11 +4569,10 @@ var server = async ({ client }, options) => {
         explicitResumeRequests.add(input.sessionID);
       if (input.command !== "pause_goal")
         return;
+      goalServices.stopAutonomy?.(input.sessionID);
       const goal = await getGoal(input.sessionID);
       if (goal?.status === "active")
         await setGoalStatus(input.sessionID, "paused");
-      cancelScheduledContinuation(input.sessionID);
-      clearTurnWatchdog(input.sessionID);
     },
     async "tool.execute.after"(input, output) {
       taskTracker.noteTaskOutput(input, output);
@@ -4448,14 +4668,16 @@ var server = async ({ client }, options) => {
         const status2 = event.properties?.status;
         if (isRecord(status2) && typeof status2.type === "string") {
           if (status2.type === "busy") {
+            const epoch = continuationEpochs.current(sessionID);
+            const revision = (busyRevisions.get(sessionID) ?? 0) + 1;
             busySessions.add(sessionID);
-            busyRevisions.set(sessionID, (busyRevisions.get(sessionID) ?? 0) + 1);
+            busyRevisions.set(sessionID, revision);
             nativeRetrySessions.delete(sessionID);
-          }
-          if (status2.type === "busy")
-            armTurnWatchdog(sessionID);
-          if (status2.type === "busy")
             await markPendingContinuationStarted(sessionID);
+            if (!disposed && epoch === continuationEpochs.current(sessionID) && busyRevisions.get(sessionID) === revision && busySessions.has(sessionID) && !nativeRetrySessions.has(sessionID)) {
+              armTurnWatchdog(sessionID);
+            }
+          }
           if (status2.type === "idle") {
             explicitResumeRequests.delete(sessionID);
             busySessions.delete(sessionID);
@@ -4600,6 +4822,7 @@ async function setupV2(context) {
       }
       await deferGoalUntilShell(sessionID, shellID);
     },
+    decidePause: (sessionID, mutate2) => continuationEpochs.decidePause(sessionID, mutate2, () => goalServices.stopAutonomy(sessionID)),
     consumeExplicitResume: (sessionID) => explicitResumeRequests.delete(sessionID),
     consumeObjectiveEdit: (sessionID, objective) => {
       const edit = objectiveEdits.get(sessionID);
@@ -4630,6 +4853,8 @@ async function setupV2(context) {
         stoppedExecutions.delete(sessionID);
       else
         stoppedExecutions.add(sessionID);
+      if (mode === "replace" && busySessions.has(sessionID))
+        armTurnWatchdog(sessionID);
     }
   };
   let autonomyAvailable = true;
@@ -4696,35 +4921,29 @@ async function setupV2(context) {
       if (disposed || !autonomyAvailable)
         return;
       await taskRecoveryComplete;
-      if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID) || watchdogRescuedSessions.has(sessionID))
-        return;
-      const goal = await getGoal(sessionID);
-      if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID))
-        return;
-      if (goal?.status !== "active" || isPlanAgent(goal.lastPromptAgent))
-        return;
-      const latestStep = latestStepBySession.get(sessionID);
-      if (isPlanAgent(latestStep?.agent))
-        return;
-      const taskStatus = taskBlockStatus(sessionID);
-      if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID))
-        return;
-      if (taskStatus && taskStatus.blocked)
-        return;
-      await reconcileShellDeferralsForHost(sessionID);
-      const current = await getGoalInternal(sessionID);
-      if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID))
-        return;
-      if (current?.status !== "active" || current.shellDeferrals.some((item) => !item.delivered) || isPlanAgent(current.lastPromptAgent) || activeContinuationsV2.has(sessionID))
-        return;
-      turnWatchdogs.delete(sessionID);
-      activeContinuationsV2.add(sessionID);
-      claimedContinuation = true;
-      claimedGoalID = current.id;
-      watchdogRescuedSessions.add(sessionID);
-      if (!isCurrent())
-        return;
-      await sendContinuation2(sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestStep?.agent ?? null);
+      for (;; ) {
+        if (!await continuationEpochs.waitUntilSettled(sessionID, epoch) || !isCurrent())
+          return;
+        await reconcileShellDeferralsForHost(sessionID);
+        const current = await getGoalInternal(sessionID);
+        if (!isCurrent())
+          return;
+        if (continuationEpochs.hasPending(sessionID))
+          continue;
+        if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID) || nativeRetrySessions.has(sessionID) || stoppedExecutions.has(sessionID) || watchdogRescuedSessions.has(sessionID) || activeContinuationsV2.has(sessionID))
+          return;
+        const latestStep = latestStepBySession.get(sessionID);
+        const taskStatus = taskBlockStatus(sessionID);
+        if (current?.status !== "active" || current.shellDeferrals.some((item) => !item.delivered) || isPlanAgent(current.lastPromptAgent) || isPlanAgent(latestStep?.agent) || taskStatus && taskStatus.blocked)
+          return;
+        turnWatchdogs.delete(sessionID);
+        activeContinuationsV2.add(sessionID);
+        claimedContinuation = true;
+        claimedGoalID = current.id;
+        watchdogRescuedSessions.add(sessionID);
+        await sendContinuation2(sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestStep?.agent ?? null);
+        break;
+      }
       if (!isCurrent())
         return;
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
@@ -4949,18 +5168,56 @@ async function setupV2(context) {
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now();
       attemptGoalID = goal.id;
       attemptID = goal.pendingAttempt?.id;
-      const beforeDelivery = await getGoalInternal(sessionID);
-      if (!isCurrent() || !continuationStillReserved(goal, beforeDelivery) || busySessions.has(sessionID) || nativeRetrySessions.has(sessionID)) {
-        await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
-        if (isCurrent() && busySessions.has(sessionID))
-          await rearmBusyContinuation(sessionID, scheduled);
-        return;
+      for (;; ) {
+        const waitedForPause = continuationEpochs.hasPending(sessionID);
+        if (!await continuationEpochs.waitUntilSettled(sessionID, epoch) || !isCurrent()) {
+          await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+          return;
+        }
+        await reconcileShellDeferralsForHost(sessionID);
+        if (waitedForPause && scheduled && typeof context.session.wait === "function") {
+          const busyRevision = busyRevisions.get(sessionID) ?? 0;
+          try {
+            const signal = AbortSignal.any([abortController.signal, AbortSignal.timeout(TASK_BLOCK_RETRY_MS)]);
+            await context.session.wait({ sessionID }, { signal });
+          } catch {
+            await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+            if (isCurrent() && !abortController.signal.aborted)
+              await rearmBusyContinuation(sessionID, scheduled);
+            return;
+          }
+          if ((busyRevisions.get(sessionID) ?? 0) === busyRevision)
+            busySessions.delete(sessionID);
+        }
+        const beforeDelivery = await getGoalInternal(sessionID);
+        if (!isCurrent()) {
+          await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+          return;
+        }
+        if (continuationEpochs.hasPending(sessionID))
+          continue;
+        const deliveryAgent = latestStepBySession.get(sessionID)?.agent;
+        const taskStatus2 = taskBlockStatus(sessionID);
+        const planRestricted = isPlanAgent(beforeDelivery?.lastPromptAgent) || isPlanAgent(deliveryAgent);
+        const ownsSchedule = !scheduled || scheduledContinuations.get(sessionID) === scheduled;
+        const reserved = continuationStillReserved(goal, beforeDelivery);
+        if (!beforeDelivery || !reserved || !ownsSchedule || stoppedExecutions.has(sessionID) || busySessions.has(sessionID) || nativeRetrySessions.has(sessionID) || planRestricted || taskStatus2 && taskStatus2.blocked || beforeDelivery.shellDeferrals.some((item) => !item.delivered)) {
+          await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+          if (isCurrent() && reserved && ownsSchedule && !stoppedExecutions.has(sessionID) && !nativeRetrySessions.has(sessionID)) {
+            if (planRestricted)
+              await pauseGoalForPlanMode(sessionID);
+            else if (busySessions.has(sessionID))
+              await rearmBusyContinuation(sessionID, scheduled);
+            else if (taskStatus2 && taskStatus2.blocked) {
+              taskDeferredSessions.add(sessionID);
+              scheduleSettledContinuation(sessionID, taskStatus2.retryAt != null ? taskStatus2.retryAt - Date.now() : TASK_BLOCK_RETRY_MS, scheduled != null);
+            }
+          }
+          return;
+        }
+        await sendContinuation2(sessionID, beforeDelivery.status === "active" ? continuationPrompt(beforeDelivery, locale) : limitPrompt(beforeDelivery, locale), beforeDelivery.lastPromptAgent ?? deliveryAgent ?? null);
+        break;
       }
-      if (scheduled && scheduledContinuations.get(sessionID) !== scheduled) {
-        await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
-        return;
-      }
-      await sendContinuation2(sessionID, goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale), goal.lastPromptAgent ?? latestTurnAgent ?? null);
       if (!isCurrent()) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         return;
@@ -5125,12 +5382,16 @@ async function setupV2(context) {
         const status2 = event.type === "session.execution.started" ? { type: "busy" } : event.type === "session.retry.scheduled" ? { type: "retry" } : data.status;
         if (sessionID && isRecord(status2) && typeof status2.type === "string") {
           if (status2.type === "busy") {
+            const epoch = continuationEpochs.current(sessionID);
+            const revision = (busyRevisions.get(sessionID) ?? 0) + 1;
             stoppedExecutions.delete(sessionID);
             busySessions.add(sessionID);
-            busyRevisions.set(sessionID, (busyRevisions.get(sessionID) ?? 0) + 1);
+            busyRevisions.set(sessionID, revision);
             nativeRetrySessions.delete(sessionID);
-            armTurnWatchdog(sessionID);
             await markPendingContinuationStarted(sessionID);
+            if (!disposed && autonomyAvailable && epoch === continuationEpochs.current(sessionID) && busyRevisions.get(sessionID) === revision && busySessions.has(sessionID) && !nativeRetrySessions.has(sessionID) && !stoppedExecutions.has(sessionID)) {
+              armTurnWatchdog(sessionID);
+            }
           }
           if (status2.type === "idle") {
             explicitResumeRequests.delete(sessionID);
@@ -5155,12 +5416,6 @@ async function setupV2(context) {
       }
       case "session.execution.succeeded":
       case "session.idle": {
-        if (sessionID && event.type === "session.execution.succeeded") {
-          const goal = await getGoalInternal(sessionID);
-          if (goal?.shellDeferrals.some((item) => item.delivered)) {
-            await releaseDeliveredShellDeferrals(sessionID);
-          }
-        }
         if (sessionID) {
           explicitResumeRequests.delete(sessionID);
           busySessions.delete(sessionID);
@@ -5168,6 +5423,12 @@ async function setupV2(context) {
           clearTurnWatchdog(sessionID);
           watchdogRescuedSessions.delete(sessionID);
           taskTracker.observeSessionStatus(sessionID, "idle");
+        }
+        if (sessionID && event.type === "session.execution.succeeded") {
+          const goal = await getGoalInternal(sessionID);
+          if (goal?.shellDeferrals.some((item) => item.delivered)) {
+            await releaseDeliveredShellDeferrals(sessionID);
+          }
         }
         if (sessionID) {
           const goal = await getGoalInternal(sessionID);
@@ -5179,7 +5440,6 @@ async function setupV2(context) {
       case "session.execution.interrupted": {
         if (!sessionID)
           return;
-        await releaseDeliveredShellDeferrals(sessionID);
         explicitResumeRequests.delete(sessionID);
         stoppedExecutions.add(sessionID);
         busySessions.delete(sessionID);
@@ -5189,6 +5449,7 @@ async function setupV2(context) {
         goalServices.stopAutonomy?.(sessionID);
         clearToolAttemptsForSession(toolAttempts, sessionID);
         taskTracker.observeSessionStatus(sessionID, "idle");
+        await releaseDeliveredShellDeferrals(sessionID);
         if (data.reason === "user")
           await cancelActiveGoal(sessionID);
         return;
@@ -5196,7 +5457,6 @@ async function setupV2(context) {
       case "session.execution.failed": {
         if (!sessionID)
           return;
-        await releaseDeliveredShellDeferrals(sessionID);
         explicitResumeRequests.delete(sessionID);
         nativeRetrySessions.delete(sessionID);
         busySessions.delete(sessionID);
@@ -5209,6 +5469,7 @@ async function setupV2(context) {
           taskDeferredSessions.delete(sessionID);
         }
         taskTracker.observeSessionStatus(sessionID, "idle");
+        await releaseDeliveredShellDeferrals(sessionID);
         if (errorMessage && isTransportError(errorMessage)) {
           const goal = await getGoalInternal(sessionID);
           if (goal?.status === "active") {
@@ -5269,6 +5530,8 @@ async function setupV2(context) {
       case "session.step.started": {
         if (!sessionID || typeof data.assistantMessageID !== "string")
           return;
+        if (scheduledContinuations.get(sessionID)?.purpose === "recovery")
+          cancelScheduledContinuation(sessionID);
         const messageID2 = data.assistantMessageID;
         const agent = typeof data.agent === "string" ? data.agent : undefined;
         if (agent)
@@ -5298,6 +5561,12 @@ async function setupV2(context) {
         if (!sessionID || typeof data.assistantMessageID !== "string")
           return;
         const messageID2 = data.assistantMessageID;
+        const text2 = stepTextBuffers.get(stepKey(sessionID, messageID2)) ?? "";
+        if (/[\p{L}\p{N}]/u.test(text2)) {
+          const scheduled = scheduledContinuations.get(sessionID);
+          if (scheduled?.purpose === "recovery")
+            cancelScheduledContinuation(sessionID);
+        }
         const tokens = tokensFromRecord(data.tokens);
         if (typeof tokens === "number") {
           const sum = (stepTokenSums.get(sessionID) ?? 0) + tokens;
@@ -5308,7 +5577,6 @@ async function setupV2(context) {
             initialBaseline: Math.ceil(sum - tokens)
           });
         }
-        const text2 = stepTextBuffers.get(stepKey(sessionID, messageID2)) ?? "";
         stepTextBuffers.delete(stepKey(sessionID, messageID2));
         const outputTokens = outputTokensFromRecord(data.tokens) ?? null;
         const afterStep = await recordAssistantProgress(sessionID, {
@@ -5320,11 +5588,6 @@ async function setupV2(context) {
           completedAt: event.created
         });
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, afterStep);
-        if (/[\p{L}\p{N}]/u.test(text2)) {
-          const scheduled = scheduledContinuations.get(sessionID);
-          if (scheduled?.purpose === "recovery")
-            cancelScheduledContinuation(sessionID);
-        }
         latestStepBySession.set(sessionID, {
           messageID: messageID2,
           agent: latestStepBySession.get(sessionID)?.agent,
@@ -5338,6 +5601,12 @@ async function setupV2(context) {
         if (!sessionID || typeof data.assistantMessageID !== "string")
           return;
         const messageID2 = data.assistantMessageID;
+        const text2 = stepTextBuffers.get(stepKey(sessionID, messageID2)) ?? "";
+        if (/[\p{L}\p{N}]/u.test(text2)) {
+          const scheduled = scheduledContinuations.get(sessionID);
+          if (scheduled?.purpose === "recovery")
+            cancelScheduledContinuation(sessionID);
+        }
         const tokens = tokensFromRecord(data.tokens);
         if (typeof tokens === "number") {
           const sum = (stepTokenSums.get(sessionID) ?? 0) + tokens;
@@ -5348,7 +5617,6 @@ async function setupV2(context) {
             initialBaseline: Math.ceil(sum - tokens)
           });
         }
-        const text2 = stepTextBuffers.get(stepKey(sessionID, messageID2)) ?? "";
         stepTextBuffers.delete(stepKey(sessionID, messageID2));
         const outputTokens = outputTokensFromRecord(data.tokens) ?? null;
         const afterStep = await recordAssistantProgress(sessionID, {
@@ -5360,11 +5628,6 @@ async function setupV2(context) {
           completedAt: event.created
         });
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, afterStep);
-        if (/[\p{L}\p{N}]/u.test(text2)) {
-          const scheduled = scheduledContinuations.get(sessionID);
-          if (scheduled?.purpose === "recovery")
-            cancelScheduledContinuation(sessionID);
-        }
         latestStepBySession.set(sessionID, {
           messageID: messageID2,
           agent: latestStepBySession.get(sessionID)?.agent,
@@ -5408,11 +5671,10 @@ async function setupV2(context) {
               objectiveEdits.set(input.sessionID, { goalID: editedGoal.id, objective: edit[1].trim() });
             markSessionOwnership(input.sessionID, true);
             if (command.action === "pause") {
+              goalServices.stopAutonomy?.(input.sessionID);
               const goal = await getGoal(input.sessionID);
               if (goal?.status === "active")
                 await setGoalStatus(input.sessionID, "paused");
-              cancelScheduledContinuation(input.sessionID);
-              clearTurnWatchdog(input.sessionID);
             }
             if (command.action === "resume" || command.action === "goal" && input.prompt.text.trim().toLowerCase() === "resume") {
               explicitResumeRequests.add(input.sessionID);
@@ -5463,7 +5725,7 @@ async function setupV2(context) {
                   pursuedGoalID ??= goal.id;
                   if (goal.id !== pursuedGoalID)
                     break;
-                  await new Promise((resolve) => setTimeout(resolve, 250));
+                  await new Promise((resolve2) => setTimeout(resolve2, 250));
                 } while (!disposed && !signal.aborted);
               }
             } catch (error) {
@@ -5501,11 +5763,10 @@ async function setupV2(context) {
         delete input.prompt.agents;
         delete input.prompt.skills;
         if (template === pauseTemplate) {
+          goalServices.stopAutonomy?.(input.sessionID);
           const goal = await getGoal(input.sessionID);
           if (goal?.status === "active")
             await setGoalStatus(input.sessionID, "paused");
-          cancelScheduledContinuation(input.sessionID);
-          clearTurnWatchdog(input.sessionID);
         }
       }
       if (isExplicitResumePrompt(input.prompt.text, commandName, locale, messages)) {
@@ -5573,10 +5834,13 @@ async function setupV2(context) {
       return;
     if (toolOutputFailed(input.result))
       return;
+    const recovering = Boolean(text2?.trim()) && expectedAttemptID == null && !activeContinuationsV2.has(sessionID) && scheduledContinuations.get(sessionID)?.purpose === "recovery";
+    if (recovering)
+      cancelScheduledContinuation(sessionID);
     const before = await getGoalInternal(sessionID);
-    if (!before || before.status !== "active" || !before.awaitingContinuationProgress && before.continuationFailures === 0 && before.pendingAttempt == null && scheduledContinuations.get(sessionID)?.purpose !== "recovery")
+    if (!before || before.status !== "active" || !before.awaitingContinuationProgress && before.continuationFailures === 0 && before.pendingAttempt == null && scheduledContinuations.get(sessionID)?.purpose !== "recovery" && !recovering)
       return;
-    const resolvingFailure = Boolean(before && (before.continuationFailures > 0 || before.pendingAttempt != null)) || scheduledContinuations.get(sessionID)?.purpose === "recovery";
+    const resolvingFailure = Boolean(before && (before.continuationFailures > 0 || before.pendingAttempt != null)) || recovering || scheduledContinuations.get(sessionID)?.purpose === "recovery";
     const progressed = await recordToolProgress(sessionID, text2, expectedAttemptID, !NON_SUBSTANTIVE_TOOLS.has(input.tool.toLowerCase()));
     if (resolvingFailure && progressed?.continuationFailures === 0 && progressed.pendingAttempt == null) {
       locallyDeliveredPendingSessions.delete(sessionID);
@@ -5650,6 +5914,7 @@ async function setupV2(context) {
       if (!disposed && !abortController.signal.aborted) {
         eventConsumerStopped = true;
         autonomyAvailable = false;
+        continuationEpochs.dispose();
         for (const scheduled of scheduledContinuations.values())
           clearTimeout(scheduled.timer);
         scheduledContinuations.clear();
@@ -5661,6 +5926,7 @@ async function setupV2(context) {
   })();
   return async () => {
     disposed = true;
+    continuationEpochs.dispose();
     abortController.abort();
     for (const scheduled of scheduledContinuations.values())
       clearTimeout(scheduled.timer);
@@ -5684,7 +5950,7 @@ async function setupV2(context) {
       }
     }
     const termination = Promise.allSettled([consumer, eventIterator?.return?.()]);
-    await Promise.race([termination, new Promise((resolve) => setTimeout(resolve, 2000))]);
+    await Promise.race([termination, new Promise((resolve2) => setTimeout(resolve2, 2000))]);
   };
 }
 function goalToolsV2(services) {

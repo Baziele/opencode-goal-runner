@@ -3,9 +3,11 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import plugin from "../src/server"
+import { withStateLock } from "../src/state-lock"
 import { holdNextStateRead } from "./state-read-gate"
 import {
   accountUsage, pauseGoalForPlanMode, setGoalStatus, cancelGoal, completeGoal, createGoal,
+  deferGoalUntilShell, noteShellNotification, noteShellNotificationDelivered,
   getGoal, getGoalInternal, recordContinuationResult, recordToolProgress, reserveContinuation,
 } from "../src/state"
 
@@ -3526,3 +3528,464 @@ test("V2 wait_for_command overrides the client default in both directions", asyn
     await cleanup()
   }
 })
+
+for (const settlement of ["interrupted", "failed"]) {
+  test(`V2 ${settlement} cancels its watchdog before waiting for state ownership`, async () => {
+    const mock = makeMockContext({ max_turn_time: 0.5, min_continue_interval_seconds: 0 })
+    const cleanup = await setupPlugin(mock as never)
+    await createGoalViaV2Tool(mock, "settle before slow persistence")
+    const held = Promise.withResolvers<void>()
+    const released = Promise.withResolvers<void>()
+    const owner = withStateLock(process.env.OPENCODE_GOAL_STATE_PATH!, async () => {
+      held.resolve()
+      await released.promise
+    })
+    let settling: Promise<void> | undefined
+    try {
+      await held.promise
+      await mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+      settling = mock.stream.push(settlement === "interrupted"
+        ? { type: "session.execution.interrupted", created: 2, data: { sessionID: "ses_v2", reason: "shutdown" } }
+        : { type: "session.execution.failed", created: 2, data: { sessionID: "ses_v2", error: { message: "invalid provider configuration" } } })
+      await Bun.sleep(800)
+      const promptsWhileHeld = mock.promptCalls.length
+      released.resolve()
+      await owner
+      await settling
+      if (promptsWhileHeld) await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+      expect(promptsWhileHeld).toBe(0)
+      expect(mock.promptCalls).toHaveLength(0)
+    } finally {
+      released.resolve()
+      await owner
+      await settling
+      mock.stream.end()
+      await cleanup()
+    }
+  }, 10_000)
+}
+
+test("V2 arms the watchdog after a blocked goal creation commits", async () => {
+  const mock = makeMockContext({ auto_continue: false, max_turn_time: 0.03 })
+  const cleanup = await setupPlugin(mock as never)
+  const held = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  const owner = withStateLock(process.env.OPENCODE_GOAL_STATE_PATH!, async () => {
+    held.resolve()
+    await released.promise
+  })
+  let creating: Promise<unknown> | undefined
+  try {
+    await held.promise
+    await mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+    creating = createGoalViaV2Tool(mock, "rescue after ownership becomes available")
+    await Bun.sleep(100)
+    expect(mock.promptCalls).toHaveLength(0)
+    released.resolve()
+    await owner
+    await creating
+    await waitFor(() => mock.promptCalls.length === 1)
+    await Bun.sleep(100)
+    expect(mock.promptCalls).toHaveLength(1)
+  } finally {
+    released.resolve()
+    await owner
+    await creating
+    mock.stream.end()
+    await cleanup()
+  }
+}, 10_000)
+
+test("V2 does not arm a watchdog while a busy event is still reading state", async () => {
+  const mock = makeMockContext({ max_turn_time: 0.03, min_continue_interval_seconds: 0 })
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "allow the queued interruption to settle")
+  const gate = holdNextStateRead(process.env.OPENCODE_GOAL_STATE_PATH!)
+  const started = mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+  const interrupted = mock.stream.push({ type: "session.execution.interrupted", created: 2, data: { sessionID: "ses_v2", reason: "shutdown" } })
+  try {
+    await gate.captured
+    await Bun.sleep(150)
+    const promptsBeforeRead = mock.promptCalls.length
+    gate.release()
+    await started
+    await interrupted
+    expect(promptsBeforeRead).toBe(0)
+    expect(mock.promptCalls).toHaveLength(0)
+  } finally {
+    gate.restore()
+    await started
+    await interrupted
+    mock.stream.end()
+    await cleanup()
+  }
+})
+
+test("V2 meaningful tool progress cancels recovery before its state read finishes", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "resume through native tool progress")
+  await mock.stream.push({ type: "session.execution.failed", created: 1, data: { sessionID: "ses_v2", error: { message: "network connection failed" } } })
+  const gate = holdNextStateRead(process.env.OPENCODE_GOAL_STATE_PATH!)
+  const progressing = mock.hooks["execute.after"]!({
+    tool: "bash", sessionID: "ses_v2", id: "call_progress", status: "completed", result: { output: "tests passed" },
+  })
+  try {
+    await gate.captured
+    await Bun.sleep(150)
+    const promptsBeforeRead = mock.promptCalls.length
+    gate.release()
+    await progressing
+    expect(promptsBeforeRead).toBe(0)
+    expect(mock.promptCalls).toHaveLength(0)
+  } finally {
+    gate.restore()
+    await progressing
+    mock.stream.end()
+    await cleanup()
+  }
+})
+
+test("V2 successful Shell settlement suppresses the watchdog while ownership is held", async () => {
+  const mock = makeMockContext({ auto_continue: false, max_turn_time: 0.5 })
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "finish the delivered Shell execution")
+  await deferGoalUntilShell("ses_v2", "shell_done")
+  await noteShellNotification("ses_v2", "shell_done", "notification_done")
+  await noteShellNotificationDelivered("ses_v2", "notification_done")
+  await mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+  const held = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  const owner = withStateLock(process.env.OPENCODE_GOAL_STATE_PATH!, async () => {
+    held.resolve()
+    await released.promise
+  })
+  let settling: Promise<void> | undefined
+  try {
+    await held.promise
+    settling = mock.stream.push({ type: "session.execution.succeeded", created: 2, data: { sessionID: "ses_v2" } })
+    await Bun.sleep(800)
+    const promptsWhileHeld = mock.promptCalls.length
+    released.resolve()
+    await owner
+    await settling
+    expect(promptsWhileHeld).toBe(0)
+    expect(mock.promptCalls).toHaveLength(0)
+    expect((await getGoalInternal("ses_v2"))?.shellDeferrals).toEqual([])
+  } finally {
+    released.resolve()
+    await owner
+    await settling
+    mock.stream.end()
+    await cleanup()
+  }
+}, 10_000)
+
+for (const control of ["stop_goal", "clear_goal", "pause_tool", "pause_objective", "pause_command", "pause_prompt"]) {
+  test(`V2 ${control} suppresses the watchdog while ownership is held`, async () => {
+    const mock = makeMockContext({ auto_continue: false, max_turn_time: 0.5 })
+    const cleanup = await setupPlugin(mock as never)
+    let pauseTemplate = ""
+    if (control === "pause_prompt") {
+      const v1 = await plugin.server({ client: {} } as never, { auto_continue: false })
+      const config: { command?: Record<string, { template: string }> } = {}
+      try {
+        await v1.config?.(config as never)
+        pauseTemplate = config.command?.pause_goal?.template ?? ""
+        expect(pauseTemplate).not.toBe("")
+      } finally {
+        await v1.dispose?.()
+      }
+    }
+    await createGoalViaV2Tool(mock, "stop before persistence is available")
+    await mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+    const held = Promise.withResolvers<void>()
+    const released = Promise.withResolvers<void>()
+    const owner = withStateLock(process.env.OPENCODE_GOAL_STATE_PATH!, async () => {
+      held.resolve()
+      await released.promise
+    })
+    let stopping: void | Promise<unknown> = undefined
+    try {
+      await held.promise
+      if (control === "pause_command") {
+        stopping = mock.commands.find((command) => command.name === "pause_goal")!.execute({
+          sessionID: "ses_v2", prompt: { text: "" }, delivery: "steer",
+        })
+      } else if (control === "pause_prompt") {
+        stopping = mock.hooks.prompt!({ sessionID: "ses_v2", prompt: { text: pauseTemplate } })
+      } else {
+        stopping = goalTool(mock, control === "pause_tool" ? "update_goal_status" : control === "pause_objective" ? "update_goal_objective" : control).execute(
+          control === "pause_objective" ? { objective: "paused objective", status: "paused" } : control === "pause_tool" ? { status: "paused" } : {}, toolContext(),
+        )
+      }
+      await Bun.sleep(800)
+      const promptsWhileHeld = mock.promptCalls.length
+      released.resolve()
+      await owner
+      await stopping
+      expect(promptsWhileHeld).toBe(0)
+      expect(mock.promptCalls).toHaveLength(control === "pause_command" ? 1 : 0)
+      expect((await getGoal("ses_v2"))?.status ?? null).toBe(
+        control === "stop_goal" ? "cancelled" : control === "clear_goal" ? null : "paused",
+      )
+    } finally {
+      released.resolve()
+      await owner
+      await stopping
+      mock.stream.end()
+      await cleanup()
+    }
+  }, 10_000)
+}
+
+test("V2 old tool output preserves a recovery reserved before delivery", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "deliver the newly reserved recovery")
+  await mock.hooks["execute.before"]!({ tool: "bash", sessionID: "ses_v2", id: "call_old", input: {} })
+  await mock.stream.push({ type: "session.execution.failed", created: 1, data: { sessionID: "ses_v2", error: { message: "network connection failed" } } })
+  const gate = holdNextStateRead(process.env.OPENCODE_GOAL_STATE_PATH!, 5)
+  try {
+    await gate.captured
+    const reserved = await getGoalInternal("ses_v2")
+    expect(reserved?.pendingAttempt).toMatchObject({ delivered: false })
+    expect(mock.promptCalls).toHaveLength(0)
+    await mock.hooks["execute.after"]!({
+      tool: "bash", sessionID: "ses_v2", id: "call_old", status: "completed", result: { output: "old tool finished" },
+    })
+    expect((await getGoalInternal("ses_v2"))?.pendingAttempt?.id).toBe(reserved?.pendingAttempt?.id)
+    gate.release()
+    await waitFor(() => mock.promptCalls.length === 1)
+    await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+    expect((await getGoalInternal("ses_v2"))?.autoTurns).toBe(1)
+    expect(mock.promptCalls).toHaveLength(1)
+  } finally {
+    gate.restore()
+    mock.stream.end()
+    await cleanup()
+  }
+})
+
+
+test("V2 rejects an invalid objective pause without suppressing the active watchdog", async () => {
+  const mock = makeMockContext({ auto_continue: false, max_turn_time: 0.05 })
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "keep the valid goal active")
+  await mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+  try {
+    await expect(goalTool(mock, "update_goal_objective").execute({ objective: " ", status: "paused" }, toolContext()))
+      .rejects.toThrow("goal objective must not be empty")
+    await waitFor(() => mock.promptCalls.length === 1)
+    await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+    expect(await getGoal("ses_v2")).toMatchObject({ objective: "keep the valid goal active", status: "active" })
+  } finally {
+    mock.stream.end()
+    await cleanup()
+  }
+})
+
+for (const control of ["stop_goal", "clear_goal", "pause_tool", "pause_objective"]) {
+  test(`V2 ${control} prevents a stale busy read from rearming the watchdog`, async () => {
+    const mock = makeMockContext({ auto_continue: false, max_turn_time: 0.03 })
+    const releasePrompt = Promise.withResolvers<void>()
+    mock.session.prompt = async (input) => {
+      mock.promptCalls.push(input)
+      await releasePrompt.promise
+      return { id: "pending_stale_busy" }
+    }
+    const cleanup = await setupPlugin(mock as never)
+    await createGoalViaV2Tool(mock, "stop the pending busy handler")
+    const held = Promise.withResolvers<void>()
+    const released = Promise.withResolvers<void>()
+    const owner = withStateLock(process.env.OPENCODE_GOAL_STATE_PATH!, async () => {
+      held.resolve()
+      await released.promise
+    })
+    const gate = holdNextStateRead(process.env.OPENCODE_GOAL_STATE_PATH!)
+    let started: Promise<void> | undefined
+    let stopping: Promise<unknown> | undefined
+    let stopped = false
+    try {
+      await held.promise
+      started = mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+      await Promise.race([gate.captured, Bun.sleep(1_000).then(() => { throw new Error("busy state read was not intercepted") })])
+      stopping = goalTool(mock, control === "pause_tool" ? "update_goal_status" : control === "pause_objective" ? "update_goal_objective" : control).execute(
+        control === "pause_objective" ? { objective: "paused objective", status: "paused" } : control === "pause_tool" ? { status: "paused" } : {}, toolContext(),
+      ).then((result) => { stopped = true; return result })
+      gate.release()
+      await started
+      await Bun.sleep(150)
+      expect(stopped).toBe(false)
+      expect((await getGoal("ses_v2"))?.status).toBe("active")
+      expect(mock.promptCalls).toHaveLength(0)
+    } finally {
+      gate.restore()
+      released.resolve()
+      await owner
+      await started
+      await stopping
+      mock.stream.end()
+      await cleanup()
+      releasePrompt.resolve()
+      await Bun.sleep(0)
+    }
+  }, 10_000)
+}
+
+for (const rejectedPause of ["planned_objective", "oversized_blocker"]) {
+  test(`V2 rejected ${rejectedPause} pause preserves the active watchdog`, async () => {
+    const mock = makeMockContext({ auto_continue: false, max_turn_time: 0.05 })
+    const cleanup = await setupPlugin(mock as never)
+    await createGoalViaV2Tool(mock, "preserve the original active goal")
+    const goal = (await getGoal("ses_v2"))!
+    if (rejectedPause === "planned_objective") {
+      await goalTool(mock, "update_goal_plan").execute({
+        goal_id: goal.id,
+        expected_revision: 0,
+        reason: "Preserve the agreed scope",
+        plan: {
+          summary: "Full scope",
+          completionCriteria: ["Parser and execution verified"],
+          phases: [{ id: "parser", objective: "Parser", status: "pending", tasks: [{ id: "parse", description: "Parse", status: "pending" }] }],
+        },
+      }, toolContext())
+    }
+    const original = await getGoal("ses_v2")
+    await mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+    try {
+      const pause = rejectedPause === "planned_objective"
+        ? goalTool(mock, "update_goal_objective").execute({ objective: "Only parser", status: "paused" }, toolContext())
+        : goalTool(mock, "update_goal_status").execute({ status: "paused", reason: "awaiting_user", blocker: "x".repeat(100_001) }, toolContext())
+      await expect(pause).rejects.toThrow(rejectedPause === "planned_objective" ? "/goal edit" : "awaiting-user blocker must be at most")
+      expect(await getGoal("ses_v2")).toMatchObject({ id: goal.id, objective: goal.objective, status: "active", plan: original?.plan })
+      await waitFor(() => mock.promptCalls.length === 1, 1_000)
+      await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+      expect((await getGoal("ses_v2"))?.status).toBe("active")
+    } finally {
+      mock.stream.end()
+      await cleanup()
+    }
+  }, 10_000)
+}
+
+for (const wakeup of ["watchdog", "scheduled recovery", "disposed watchdog"]) {
+  test(wakeup === "disposed watchdog"
+    ? "V2 disposing during a pending pause prevents sends after its rejection"
+    : `V2 a delayed rejected pause preserves the ${wakeup}`, async () => {
+    const mock = makeMockContext({ auto_continue: wakeup === "scheduled recovery", max_turn_time: 0.03, min_continue_interval_seconds: 0 })
+    const cleanup = await setupPlugin(mock as never)
+    await createGoalViaV2Tool(mock, "preserve the agreed full scope")
+    const goal = (await getGoal("ses_v2"))!
+    await goalTool(mock, "update_goal_plan").execute({
+      goal_id: goal.id,
+      expected_revision: 0,
+      reason: "Preserve the agreed scope",
+      plan: {
+        summary: "Full scope",
+        completionCriteria: ["Parser and execution verified"],
+        phases: [{ id: "parser", objective: "Parser", status: "pending", tasks: [{ id: "parse", description: "Parse", status: "pending" }] }],
+      },
+    }, toolContext())
+    await mock.stream.push(wakeup === "scheduled recovery"
+      ? { type: "session.execution.failed", created: 1, data: { sessionID: "ses_v2", error: { message: "network connection failed" } } }
+      : { type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+    const gate = holdNextStateRead(process.env.OPENCODE_GOAL_STATE_PATH!)
+    const held = Promise.withResolvers<void>()
+    const released = Promise.withResolvers<void>()
+    const owner = withStateLock(process.env.OPENCODE_GOAL_STATE_PATH!, async () => {
+      held.resolve()
+      await released.promise
+    })
+    let rejected: Promise<unknown> | undefined
+    let settled = false
+    try {
+      await held.promise
+      rejected = goalTool(mock, "update_goal_objective").execute({ objective: "Only parser", status: "paused" }, toolContext())
+        .then(() => { settled = true; return null }, (error: unknown) => { settled = true; return error })
+      gate.release()
+      await Bun.sleep(150)
+      expect(settled).toBe(false)
+      expect(mock.promptCalls).toHaveLength(0)
+      if (wakeup === "disposed watchdog") {
+        mock.stream.end()
+        await Promise.race([cleanup(), Bun.sleep(1_000).then(() => { throw new Error("dispose waited for the pause verdict") })])
+      }
+      released.resolve()
+      await owner
+      const error = await rejected
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain("/goal edit")
+      expect(await getGoal("ses_v2")).toMatchObject({ id: goal.id, objective: goal.objective, status: "active", planRevision: 1 })
+      if (wakeup === "disposed watchdog") {
+        await Bun.sleep(150)
+        expect(mock.promptCalls).toHaveLength(0)
+        expect((await getGoalInternal("ses_v2"))?.pendingAttempt).toBeNull()
+      } else {
+        await waitFor(() => mock.promptCalls.length === 1, 1_000)
+        await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+      }
+    } finally {
+      gate.restore()
+      released.resolve()
+      await owner
+      await rejected
+      mock.stream.end()
+      await cleanup()
+    }
+  }, 10_000)
+}
+
+for (const pauseKind of ["Plan mode", "overlapping rejected blocker"]) {
+  test(`V2 ${pauseKind} pause suppresses the watchdog until its verdict`, async () => {
+    const mock = makeMockContext({ auto_continue: false, max_turn_time: 0.03 })
+    const releasePrompt = Promise.withResolvers<void>()
+    mock.session.prompt = async (input) => {
+      mock.promptCalls.push(input)
+      await releasePrompt.promise
+      return { id: "pending_pause" }
+    }
+    const cleanup = await setupPlugin(mock as never)
+    await createGoalViaV2Tool(mock, "preserve the goal until paused")
+    const held = Promise.withResolvers<void>()
+    const released = Promise.withResolvers<void>()
+    const owner = withStateLock(process.env.OPENCODE_GOAL_STATE_PATH!, async () => {
+      held.resolve()
+      await released.promise
+    })
+    let pausing: Promise<unknown> | undefined
+    let paused = false
+    try {
+      await held.promise
+      await mock.stream.push({ type: "session.execution.started", created: 1, data: { sessionID: "ses_v2" } })
+      pausing = goalTool(mock, "update_goal_objective").execute(
+        { objective: "preserve the goal until paused", status: pauseKind === "Plan mode" ? "active" : "paused" },
+        toolContext("ses_v2", pauseKind === "Plan mode" ? "plan" : "build"),
+      ).then((result) => { paused = true; return result })
+      if (pauseKind === "overlapping rejected blocker") {
+        await expect(goalTool(mock, "update_goal_status").execute(
+          { status: "paused", reason: "awaiting_user", blocker: "x".repeat(100_001) }, toolContext(),
+        )).rejects.toThrow("awaiting-user blocker must be at most")
+      }
+      await Bun.sleep(150)
+      expect(paused).toBe(false)
+      expect((await getGoal("ses_v2"))?.status).toBe("active")
+      const promptsWhilePending = mock.promptCalls.length
+      released.resolve()
+      await owner
+      await pausing
+      expect(promptsWhilePending).toBe(0)
+      expect((await getGoal("ses_v2"))?.status).toBe("paused")
+      await Bun.sleep(50)
+      expect(mock.promptCalls).toHaveLength(0)
+    } finally {
+      released.resolve()
+      await owner
+      await pausing
+      mock.stream.end()
+      await cleanup()
+      releasePrompt.resolve()
+      await Bun.sleep(0)
+    }
+  }, 10_000)
+}

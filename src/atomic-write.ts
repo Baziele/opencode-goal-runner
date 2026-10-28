@@ -84,17 +84,30 @@ export function isUnsupportedSyncDirError(error: unknown, platform: NodeJS.Platf
   )
 }
 
-/**
- * Errors that can transiently fail a same-directory rename, most commonly on
- * Windows when the target file is briefly locked by another process (antivirus
- * scanners, an OpenCode session holding the state file open). These are worth a
- * small bounded retry before giving up. Anything else (EIO, ENOENT, ENOSPC...)
- * is a genuine failure and must not be retried.
- */
-export function isTransientRenameError(error: unknown, platform: NodeJS.Platform): boolean {
+export function isTransientWindowsFileError(error: unknown, platform: NodeJS.Platform): boolean {
   if (platform !== "win32") return false
   const code = (error as NodeJS.ErrnoException | null)?.code
   return code === "EPERM" || code === "EACCES" || code === "EBUSY"
+}
+
+export const OPEN_ATTEMPTS = 10
+
+async function openWithRetry(
+  ops: AtomicWriteOps,
+  path: string,
+  flags: string | number,
+  mode: number,
+): Promise<FileHandleOps> {
+  let attempt = 0
+  for (;;) {
+    try {
+      return await ops.open(path, flags, mode)
+    } catch (error) {
+      attempt += 1
+      if (!isTransientWindowsFileError(error, ops.platform) || attempt >= OPEN_ATTEMPTS) throw error
+      await ops.sleep(renameRetryDelayMs(attempt))
+    }
+  }
 }
 
 async function bestEffort(action: () => void | Promise<void>): Promise<void> {
@@ -206,7 +219,7 @@ async function renameWithRetry(ops: AtomicWriteOps, from: string, to: string): P
       attempt += 1
       // A non-transient error fails immediately; transient errors get a small,
       // bounded number of attempts (renaming over a briefly-locked target).
-      if (!isTransientRenameError(error, ops.platform) || attempt >= RENAME_ATTEMPTS) throw error
+      if (!isTransientWindowsFileError(error, ops.platform) || attempt >= RENAME_ATTEMPTS) throw error
       await ops.sleep(renameRetryDelayMs(attempt))
     }
   }
@@ -260,7 +273,7 @@ export async function atomicWriteFile(
     // "wx" = create exclusively: fail with EEXIST if the temp path already
     // exists, so an accidental collision can never clobber another writer's
     // file. The UUID name makes collisions effectively impossible anyway.
-    handle = await ops.open(tmp, "wx", 0o600)
+    handle = await openWithRetry(ops, tmp, "wx", 0o600)
     created = true
     await handle.write(data)
     await handle.sync()

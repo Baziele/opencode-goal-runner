@@ -74,11 +74,13 @@ const PLAN_POLICY_ZH_CN = [
 const CONTINUATION_BEHAVIOR_EN = `Continuation behavior:
 - This goal persists across turns. Ending this turn does not require shrinking the objective to what fits now.
 - Keep the full objective intact. If it cannot be finished now, make concrete progress toward the real requested end state.
+- Keep this main thread small: do tiny edits directly, but delegate anything big, exploratory, or output-heavy to subagents and bring back only a short report plus file paths. Never paste large logs or file dumps here.
 - Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.`
 
 const CONTINUATION_BEHAVIOR_ZH_CN = `继续执行规则：
 - 此目标会跨轮次持续存在。本轮结束并不意味着需要把目标缩小到本轮能够完成的范围。
 - 保持完整目标不变。如果现在无法全部完成，就朝用户真正要求的最终状态取得具体进展。
+- 保持主线程精简：微小的修改可直接处理，较大、探索性或输出繁重的工作应交给子代理，只带回简短报告和文件路径。不要在此粘贴大量日志或文件内容。
 - 在工作持续朝正确方向推进时，可以暂时存在不完善之处；但只有用户要求的最终状态真实达成并经过验证，才能视为完成。`
 
 const EVIDENCE_INSTRUCTIONS_EN = `Work from evidence:

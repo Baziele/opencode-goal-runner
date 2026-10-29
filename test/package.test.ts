@@ -34,10 +34,10 @@ test("the packed plugin resolves its entrypoints and mutates state under Bun and
     const tarball = readdirSync(root).find((file) => file.endsWith(".tgz"))
     if (!tarball) throw new Error("npm pack did not produce a package")
     await new Bun.Archive(await Bun.file(join(root, tarball)).arrayBuffer()).extract(join(root, "unpacked"))
-    const scope = join(root, "node_modules", "@prevalentware")
+    const scope = join(root, "node_modules", "@baziele")
     await mkdir(scope, { recursive: true })
     await rename(join(root, "unpacked", "package"), join(scope, "opencode-goal-plugin"))
-    const name = "@prevalentware/opencode-goal-plugin"
+    const name = "@baziele/opencode-goal-runner"
     const entrypoints = { "": "dist/server.js", "/server": "dist/server.js", "/tui": "src/tui.ts" }
     for (const [suffix, target] of Object.entries(entrypoints)) {
       expect(Bun.resolveSync(name + suffix, root)).toBe(realpathSync(join(root, "node_modules", name, target)))
@@ -50,7 +50,7 @@ test("the packed plugin resolves its entrypoints and mutates state under Bun and
       const mutated = Bun.spawnSync([runtime, "--input-type=module", "-e", `
         import assert from "node:assert/strict"
         import { readFile } from "node:fs/promises"
-        import plugin from "@prevalentware/opencode-goal-plugin/server"
+        import plugin from "@baziele/opencode-goal-runner/server"
         const hooks = await plugin.server({ client: {} }, { auto_continue: false })
         try {
           const context = { sessionID: "packed", agent: "build" }
@@ -74,7 +74,7 @@ test("the packed plugin resolves its entrypoints and mutates state under Bun and
       import { resolve } from "node:path"
       import { fileURLToPath } from "node:url"
       const require = createRequire(resolve("consumer.cjs"))
-      const name = "@prevalentware/opencode-goal-plugin"
+      const name = "@baziele/opencode-goal-runner"
       for (const [suffix, target] of Object.entries(${JSON.stringify(entrypoints)})) {
         const expected = resolve("node_modules", name, target)
         assert.ok(existsSync(expected), "Missing published entrypoint: " + expected)

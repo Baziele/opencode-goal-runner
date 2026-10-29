@@ -1,7 +1,7 @@
 {
-  "name": "@prevalentware/opencode-goal-plugin",
+  "name": "@baziele/opencode-goal-runner",
   "version": "0.1.1",
-  "description": "OpenCode goal plugin that adds Codex-style long-running goal mode, /goal commands, persistence, and TUI status for AI coding agents.",
+  "description": "OpenCode goal runner plugin: long-running /goal mode with resilient auto-continuation, orchestrator delegation, and context-aware retries.",
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -17,16 +17,16 @@
     "agent",
     "tui"
   ],
-  "homepage": "https://github.com/prevalentWare/opencode-goal-plugin#readme",
+  "homepage": "https://github.com/Baziele/opencode-goal-runner#readme",
   "bugs": {
-    "url": "https://github.com/prevalentWare/opencode-goal-plugin/issues"
+    "url": "https://github.com/Baziele/opencode-goal-runner/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/prevalentWare/opencode-goal-plugin.git"
+    "url": "git+https://github.com/Baziele/opencode-goal-runner.git"
   },
   "license": "MIT",
-  "author": "Prevalentware",
+  "author": "Baziele",
   "type": "module",
   "main": "./dist/server.js",
   "exports": {

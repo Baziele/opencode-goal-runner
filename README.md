@@ -1,7 +1,7 @@
 # OpenCode Goal Plugin
 
-[![npm version](https://img.shields.io/npm/v/@prevalentware/opencode-goal-plugin.svg)](https://www.npmjs.com/package/@prevalentware/opencode-goal-plugin)
-[![GitHub repository](https://img.shields.io/badge/GitHub-prevalentWare%2Fopencode--goal--plugin-blue?logo=github)](https://github.com/prevalentWare/opencode-goal-plugin)
+[![npm version](https://img.shields.io/npm/v/@baziele/opencode-goal-runner.svg)](https://www.npmjs.com/package/@baziele/opencode-goal-runner)
+[![GitHub repository](https://img.shields.io/badge/GitHub-Baziele%2Fopencode--goal--runner-blue?logo=github)](https://github.com/Baziele/opencode-goal-runner)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 OpenCode Goal Plugin adds Codex-style long-running goal mode to OpenCode. It gives AI coding agents a `/goal` slash command, persistent goal state, completion evidence, idle continuation, and a terminal UI goal indicator so an OpenCode session can keep working toward one explicit objective until it is complete, blocked, or cleared.
@@ -12,9 +12,9 @@ Also check out [OpenCode Loop Plugin](https://github.com/prevalentWare/opencode-
 
 Links:
 
-- npm package: [`@prevalentware/opencode-goal-plugin`](https://www.npmjs.com/package/@prevalentware/opencode-goal-plugin)
-- GitHub repository: [`prevalentWare/opencode-goal-plugin`](https://github.com/prevalentWare/opencode-goal-plugin)
-- OpenCode 1 global install: `opencode plugin -g @prevalentware/opencode-goal-plugin`
+- npm package: [`@baziele/opencode-goal-runner`](https://www.npmjs.com/package/@baziele/opencode-goal-runner)
+- GitHub repository: [`Baziele/opencode-goal-runner`](https://github.com/Baziele/opencode-goal-runner)
+- OpenCode 1 global install: `opencode plugin -g @baziele/opencode-goal-runner`
 
 The OpenCode Goal Plugin adds:
 
@@ -61,7 +61,7 @@ Do not mix the configuration formats. OpenCode 1 uses `plugin` and `tui.json`; O
 For goal mode across your projects, install globally:
 
 ```bash
-opencode plugin -g @prevalentware/opencode-goal-plugin
+opencode plugin -g @baziele/opencode-goal-runner
 ```
 
 The global install registers the plugin in your user configuration and avoids creating a project-local `.opencode/`
@@ -70,7 +70,7 @@ directory for its dependencies.
 If you want the plugin only in the current project, install it from that project's directory instead:
 
 ```bash
-opencode plugin @prevalentware/opencode-goal-plugin
+opencode plugin @baziele/opencode-goal-runner
 ```
 
 The project install can create `.opencode/` with plugin dependencies in your workspace. OpenCode detects both package
@@ -82,7 +82,7 @@ For manual installation, add the package to both V1 config files.
 
 ```json
 {
-  "plugin": ["@prevalentware/opencode-goal-plugin"]
+  "plugin": ["@baziele/opencode-goal-runner"]
 }
 ```
 
@@ -90,7 +90,7 @@ For manual installation, add the package to both V1 config files.
 
 ```json
 {
-  "plugin": ["@prevalentware/opencode-goal-plugin"]
+  "plugin": ["@baziele/opencode-goal-runner"]
 }
 ```
 
@@ -106,7 +106,7 @@ Add the package to both V2 plugin lists:
 
 ```json
 {
-  "plugins": ["@prevalentware/opencode-goal-plugin"]
+  "plugins": ["@baziele/opencode-goal-runner"]
 }
 ```
 
@@ -114,7 +114,7 @@ Add the package to both V2 plugin lists:
 
 ```json
 {
-  "plugins": ["@prevalentware/opencode-goal-plugin"]
+  "plugins": ["@baziele/opencode-goal-runner"]
 }
 ```
 
@@ -130,7 +130,7 @@ In OpenCode 1, server options use the package-and-options tuple in `opencode.jso
 {
   "plugin": [
     [
-      "@prevalentware/opencode-goal-plugin",
+      "@baziele/opencode-goal-runner",
       {
         "auto_continue": true,
         "defer_while_tasks_active": true,
@@ -159,7 +159,7 @@ In OpenCode 2, use the plugin object form instead:
 {
   "plugins": [
     {
-      "package": "@prevalentware/opencode-goal-plugin",
+      "package": "@baziele/opencode-goal-runner",
       "options": {
         "auto_continue": true,
         "max_auto_turns": 25,
@@ -179,7 +179,7 @@ option in `tui.json`:
 {
   "plugin": [
     [
-      "@prevalentware/opencode-goal-plugin",
+      "@baziele/opencode-goal-runner",
       {
         "locale": "zh-CN"
       }
@@ -193,7 +193,7 @@ Defaults:
 - `auto_continue`: `true`
 - `defer_while_tasks_active`: `true`; when enabled, goal auto-continuation waits for active OpenCode Task child sessions and their orchestrator reconciliation before sending the next goal prompt. A deferral re-checks child sessions on a short timer, so a goal deferred by a task never depends on a further idle event to resume.
 - `max_task_block_seconds`: `900`; wall-clock ceiling on how long a single Task child session may defer goal continuation. A child that stays listed but never reports a terminal state, or a terminal child whose result is never reconciled, stops blocking once the ceiling passes. Set a smaller value for shorter subagents, `0` to remove the ceiling, or disable deferral entirely with `defer_while_tasks_active: false`.
-- `max_auto_turns`: `25`; explicitly resuming a goal with `/goal resume` or `/resume_goal` after it reaches this limit starts a fresh auto-turn window. Token usage and elapsed-time usage are preserved.
+- `max_auto_turns`: unset by default (unlimited auto-continuation); set a positive number to cap automatic turns per goal. Explicitly resuming a goal with `/goal resume` or `/resume_goal` after it reaches a cap starts a fresh auto-turn window. Token usage and elapsed-time usage are preserved. No-progress and prompt-failure safeguards still pause runaway goals.
 - `min_continue_interval_seconds`: `3`
 - Fast V2 executions that finish inside this interval schedule a delayed continuation; they do not require another user message to wake up.
 - `max_turn_time`: unset by default; set a positive number of seconds to retry one active-goal continuation prompt when a model turn remains busy for that long. Each new busy event resets the watchdog. Idle, built-in retry, session deletion, active Task children, and restricted agents suppress the retry. Watchdog retries are independent of `min_continue_interval_seconds` and never consume auto-turn or no-progress budgets, but recognized transport failures still count toward the `max_prompt_failures` ceiling.
@@ -310,7 +310,7 @@ continuations with the default minimum interval, then verifies completion. A
 second loaded location checks that server-wide events do not duplicate delivery.
 The test prints its temporary artifact directory and shuts down its private
 server. Use `OPENCODE_V2_BIN` to select another V2 binary, or run
-`bun run smoke:v2 @prevalentware/opencode-goal-plugin@<version>` to install and
+`bun run smoke:v2 @baziele/opencode-goal-runner@<version>` to install and
 verify an exact published package in the isolated environment.
 
 ## Publishing
@@ -321,7 +321,7 @@ Before the first automated publish, configure the package on npm:
 
 1. Open the package settings on npmjs.com.
 2. Add a Trusted Publisher for GitHub Actions.
-3. Use repository `prevalentWare/opencode-goal-plugin`.
+3. Use repository `Baziele/opencode-goal-runner`.
 4. Use workflow file `publish.yml`.
 
 The repository must be public for npm provenance to be generated automatically.

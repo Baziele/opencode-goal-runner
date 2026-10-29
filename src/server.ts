@@ -90,7 +90,7 @@ type UpdateGoalArgs =
       blocker?: string
     }
 
-const DEFAULT_MAX_AUTO_TURNS = 25
+const DEFAULT_MAX_AUTO_TURNS: number | null = null
 const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
 const DEFAULT_MAX_PROMPT_FAILURES = 3
 const DEFAULT_COMMAND_NAME = "goal"
@@ -104,6 +104,17 @@ const STALE_PENDING_MS = 30_000
 const RETRY_SETTLE_MS = 25
 const TRANSPORT_ERROR_PATTERN =
   /\b(?:network|fetch|socket|connect|connection|timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|transport|stream|websocket|offline|internet|request failed|proxy)\b/i
+// Retryable provider pressure: rate limits and burst caps. These are not
+// transport faults, but backing off and retrying is the correct response —
+// unlike terminal config/abort errors. Handled separately from transport so
+// the retry can use a longer backoff (see retryBackoffMs).
+const RATE_LIMIT_ERROR_PATTERN =
+  /\b(?:rate.?limit|rate.?limited|quota|quota.?exceeded|too.?many.?requests|429|burst|burst.?cap|throttl(?:ed|ing)|capacity|overloaded|server.?busy|temporarily.?unavailable|503)\b/i
+// The request itself was rejected as too large/unsupported. Retrying
+// immediately never helps; the host gets one delayed retry (compaction may
+// have run meanwhile) and then the goal pauses with a clear message.
+const OVERFLOW_ERROR_PATTERN =
+  /\b(?:context.?length|context.?window|too.?long|too.?large|maximum.?context|token.?(?:limit|count).?exceed|input.?too.?long|invalid.?request.*too|request.?too.?large|payload.?too.?large|model.?unavailable|model.?not.?found)\b/i
 const NON_TRANSPORT_TERMINAL_PATTERN = /\b(?:abort(?:ed)?|interrupt(?:ed|ion)?)\b/i
 const NON_PROGRESS_TOOLS = new Set(["get_goal", "get_goal_history", "list_all_goals", "defer_goal_until_shell", "release_goal_shell_deferral"])
 const NON_SUBSTANTIVE_TOOLS = new Set(["update_goal_plan", "update_goal_objective", "update_goal", "update_goal_status", "create_goal", "set_goal", "stop_goal", "replace_goal", "clear_goal", "todowrite"])
@@ -275,7 +286,8 @@ $ARGUMENTS
   目标必须完整忠实地表达参数中的每项要求、约束、范围边界和成功标准，不得遗漏或压缩含义。
   可以为了清晰和连贯调整结构和措辞，但不要截断、删除内容，也不要用外部文件引用替代实际内容。
   如果用户明确给出预算要求，应通过 token_budget、max_auto_turns 或 max_duration_seconds 传给 create_goal，
-  而不是把这些预算文字留在 objective 中。
+  而不是把这些预算文字留在 objective 中。例如“最多 100 轮”即设置 max_auto_turns；
+  自动继续默认不限轮数，只有用户要求时才设置上限。
 
 只能根据这些明确的命令参数创建目标。不要从无关的会话上下文推断目标。create_goal 成功或返回匹配的现有目标后，本次命令中不要再次调用它；请从返回的目标状态继续工作。`
   }
@@ -290,7 +302,9 @@ $ARGUMENTS
     "You may restructure and rephrase for clarity and coherence, but do NOT compress, truncate, or drop any content, " +
       "and do NOT substitute the content with references or pointers to external files.",
     "If the user includes explicit budget instructions, pass token_budget, max_auto_turns, or max_duration_seconds to " +
-      "create_goal rather than leaving those words in the objective.",
+      "create_goal rather than leaving those words in the objective. " +
+      "For example, 'max 100 turns' or 'limit to 50 turns' sets max_auto_turns; " +
+      "auto-continuation is otherwise unlimited, so only set a cap when the user asks for one.",
   ].join(" ")
 
   return `OpenCode goal mode command "/${commandName}" was invoked.
@@ -643,6 +657,52 @@ function isTransportError(error: unknown) {
   if (!message || NON_TRANSPORT_TERMINAL_PATTERN.test(message)) return false
   if (TRANSPORT_ERROR_PATTERN.test(message)) return true
   return false
+}
+
+function errorText(error: unknown) {
+  return error instanceof Error ? error.message : typeof error === "string" ? error : ""
+}
+
+function isRateLimitError(error: unknown) {
+  const message = errorText(error)
+  if (!message || NON_TRANSPORT_TERMINAL_PATTERN.test(message)) return false
+  return RATE_LIMIT_ERROR_PATTERN.test(message)
+}
+
+function isOverflowError(error: unknown) {
+  const message = errorText(error)
+  if (!message || NON_TRANSPORT_TERMINAL_PATTERN.test(message)) return false
+  return OVERFLOW_ERROR_PATTERN.test(message)
+}
+
+// Extra backoff for pressured retries: quadratic in consecutive failures,
+// capped at 5 minutes. Added on top of the normal minimum-interval delay so
+// rate-limited and oversized continuations back off instead of hammering.
+const RATE_LIMIT_BACKOFF_BASE_MS = 5_000
+const OVERFLOW_RETRY_DELAY_MS = 60_000
+const MAX_RETRY_BACKOFF_MS = 300_000
+
+function retryBackoffMs(consecutiveFailures: number) {
+  const failures = Math.max(0, Math.floor(consecutiveFailures))
+  return Math.min(MAX_RETRY_BACKOFF_MS, failures * failures * RATE_LIMIT_BACKOFF_BASE_MS)
+}
+
+// Delay for a pressured retry: transport failures reuse the normal minimum
+// interval, rate-limited failures add quadratic backoff, and oversized
+// rejections wait a full minute (giving host compaction a chance to run)
+// plus backoff. All retries stay bounded by max_prompt_failures at the call
+// sites below.
+function pressuredRetryDelayMs(
+  error: unknown,
+  minIntervalSeconds: number,
+  attemptAt: number,
+  consecutiveFailures: number,
+  now = Date.now(),
+) {
+  const base = continuationRetryDelayMs(minIntervalSeconds, attemptAt, now)
+  if (isRateLimitError(error)) return base + retryBackoffMs(consecutiveFailures)
+  if (isOverflowError(error)) return OVERFLOW_RETRY_DELAY_MS + retryBackoffMs(consecutiveFailures)
+  return base
 }
 
 function transportErrorMessageFromEvent(props: Record<string, unknown>) {
@@ -1777,9 +1837,9 @@ const server: Plugin = async ({ client }, options?: Options) => {
     } catch (error) {
       try {
         // Watchdog rescues share the same prompt-failure ceiling: recognized
-        // transport errors accumulate toward max_prompt_failures without
-        // consuming auto-turn budgets.
-        if (claimedContinuation && isCurrent() && isTransportError(error)) {
+        // transport, rate-limit, and oversized-request errors accumulate
+        // toward max_prompt_failures without consuming auto-turn budgets.
+        if (claimedContinuation && isCurrent() && (isTransportError(error) || isRateLimitError(error) || isOverflowError(error))) {
           await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID })
         }
         await client.app?.log?.({
@@ -2086,10 +2146,12 @@ const server: Plugin = async ({ client }, options?: Options) => {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
         return
       }
-      if (isTransportError(error)) {
-        // A transport failure is a real attempt: count it toward the
-        // max_prompt_failures ceiling and schedule a bounded retry at the
-        // remaining minimum interval. Keep the reserved autoTurn consumed.
+      if (isTransportError(error) || isRateLimitError(error) || isOverflowError(error)) {
+        // A transport, rate-limit, or oversized-request failure is a real
+        // attempt: count it toward the max_prompt_failures ceiling and
+        // schedule a bounded retry. Rate-limited retries back off
+        // quadratically; oversized rejections wait longer so host compaction
+        // has a chance to run. Keep the reserved autoTurn consumed.
         const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID,
@@ -2097,7 +2159,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
             sessionID,
-            continuationRetryDelayMs(minInterval, attemptReservedAt),
+            pressuredRetryDelayMs(error, minInterval, attemptReservedAt, afterFailure?.continuationFailures ?? 1),
             true,
             "retry",
           )
@@ -2459,7 +2521,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
         watchdogRescuedSessions.delete(sessionID)
         const props = (event as { properties?: Record<string, unknown> }).properties ?? {}
         const errorMessage = transportErrorMessageFromEvent(props)
-        if (errorMessage && isTransportError(errorMessage)) {
+        if (errorMessage && (isTransportError(errorMessage) || isRateLimitError(errorMessage) || isOverflowError(errorMessage))) {
           const goal = await getGoalInternal(sessionID)
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal)
@@ -2479,7 +2541,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
               if (autoContinue && afterFailure?.status === "active") {
                 scheduleSettledContinuation(
                   sessionID,
-                  continuationRetryDelayMs(minInterval, attempt.reservedAt),
+                  pressuredRetryDelayMs(errorMessage, minInterval, attempt.reservedAt, goal.continuationFailures + 1),
                   true,
                   "retry",
                 )
@@ -2738,10 +2800,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       }
     } catch (error) {
       try {
-        if (claimedContinuation && isCurrent() && isTransportError(error)) {
+        if (claimedContinuation && isCurrent() && (isTransportError(error) || isRateLimitError(error) || isOverflowError(error))) {
           // Watchdog rescues share the same prompt-failure ceiling: recognized
-          // transport errors accumulate toward max_prompt_failures without
-          // consuming auto-turn budgets.
+          // transport, rate-limit, and oversized-request errors accumulate
+          // toward max_prompt_failures without consuming auto-turn budgets.
           await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID })
         }
         v2ErrorLog("Turn watchdog retry failed", error)
@@ -3055,7 +3117,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
         return
       }
-      if (isTransportError(error)) {
+      if (isTransportError(error) || isRateLimitError(error) || isOverflowError(error)) {
         const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID,
@@ -3063,7 +3125,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
             sessionID,
-            continuationRetryDelayMs(minInterval, attemptReservedAt),
+            pressuredRetryDelayMs(error, minInterval, attemptReservedAt, afterFailure?.continuationFailures ?? 1),
             true,
             "retry",
           )
@@ -3328,14 +3390,14 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         clearTurnWatchdog(sessionID)
         watchdogRescuedSessions.delete(sessionID)
         const errorMessage = transportErrorMessageFromEvent(data)
-        if (!isTransportError(errorMessage)) {
+        if (!isTransportError(errorMessage) && !isRateLimitError(errorMessage) && !isOverflowError(errorMessage)) {
           stoppedExecutions.add(sessionID)
           cancelScheduledContinuation(sessionID)
           taskDeferredSessions.delete(sessionID)
         }
         taskTracker.observeSessionStatus(sessionID, "idle")
         await releaseDeliveredShellDeferrals(sessionID)
-        if (errorMessage && isTransportError(errorMessage)) {
+        if (errorMessage && (isTransportError(errorMessage) || isRateLimitError(errorMessage) || isOverflowError(errorMessage))) {
           const goal = await getGoalInternal(sessionID)
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal)
@@ -3353,7 +3415,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
               if (autoContinue && afterFailure?.status === "active") {
                 scheduleSettledContinuation(
                   sessionID,
-                  continuationRetryDelayMs(minInterval, attempt.reservedAt),
+                  pressuredRetryDelayMs(errorMessage, minInterval, attempt.reservedAt, goal.continuationFailures + 1),
                   true,
                   "retry",
                 )

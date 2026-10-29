@@ -50,40 +50,40 @@ var GoalPlanInputSchema = GoalPlanDraftSchema.superRefine((plan, ctx) => {
   const ids = new Set;
   let runningPhases = 0;
   let runningTasks = 0;
-  for (const [phaseIndex, phase2] of plan.phases.entries()) {
+  for (const [phaseIndex, phase] of plan.phases.entries()) {
     const phasePath = ["phases", phaseIndex];
-    if (ids.has(phase2.id))
+    if (ids.has(phase.id))
       ctx.addIssue({ code: "custom", message: "plan IDs must be unique", path: [...phasePath, "id"] });
-    ids.add(phase2.id);
-    if (phase2.status === "in_progress")
+    ids.add(phase.id);
+    if (phase.status === "in_progress")
       runningPhases++;
-    if (phase2.status === "blocked" && !phase2.blocker)
+    if (phase.status === "blocked" && !phase.blocker)
       ctx.addIssue({ code: "custom", message: "blocked phases require a blocker", path: [...phasePath, "blocker"] });
-    if (phase2.status === "completed" && (!phase2.verification || phase2.tasks.some((task2) => task2.status !== "completed"))) {
+    if (phase.status === "completed" && (!phase.verification || phase.tasks.some((task) => task.status !== "completed"))) {
       ctx.addIssue({
         code: "custom",
         message: "completed phases require verified tasks and phase verification",
         path: [...phasePath, "verification"]
       });
     }
-    for (const [taskIndex, task2] of phase2.tasks.entries()) {
+    for (const [taskIndex, task] of phase.tasks.entries()) {
       const taskPath = [...phasePath, "tasks", taskIndex];
-      if (ids.has(task2.id))
+      if (ids.has(task.id))
         ctx.addIssue({ code: "custom", message: "plan IDs must be unique", path: [...taskPath, "id"] });
-      ids.add(task2.id);
-      if (task2.status === "completed" && !task2.evidence)
+      ids.add(task.id);
+      if (task.status === "completed" && !task.evidence)
         ctx.addIssue({ code: "custom", message: "completed tasks require evidence", path: [...taskPath, "evidence"] });
-      if (task2.status === "blocked" && !task2.blocker)
+      if (task.status === "blocked" && !task.blocker)
         ctx.addIssue({ code: "custom", message: "blocked tasks require a blocker", path: [...taskPath, "blocker"] });
-      if (task2.status === "in_progress") {
+      if (task.status === "in_progress") {
         runningTasks++;
-        if (phase2.status !== "in_progress")
+        if (phase.status !== "in_progress")
           ctx.addIssue({ code: "custom", message: "running tasks require a running phase", path: [...taskPath, "status"] });
       }
     }
   }
-  const firstUnfinished = plan.phases.find((phase2) => phase2.status !== "completed");
-  if (plan.phases.some((phase2) => phase2.status === "in_progress" && phase2 !== firstUnfinished))
+  const firstUnfinished = plan.phases.find((phase) => phase.status !== "completed");
+  if (plan.phases.some((phase) => phase.status === "in_progress" && phase !== firstUnfinished))
     ctx.addIssue({ code: "custom", message: "verify the current phase before starting the next phase", path: ["phases"] });
   if (runningPhases > 1 || runningTasks > 1)
     ctx.addIssue({ code: "custom", message: "choose one current phase and task", path: ["phases"] });
@@ -121,30 +121,30 @@ function applyGoalPlanOps(previous, ops) {
         errors.push(`plan_ops[${index}].phase_id (${op.phase_id}): set_phase requires a field to change`);
         continue;
       }
-      const target2 = next.phases.find((phase2) => phase2.id === op.phase_id);
-      if (!target2) {
+      const target = next.phases.find((phase) => phase.id === op.phase_id);
+      if (!target) {
         errors.push(`plan_ops[${index}].phase_id (${op.phase_id}): unknown phase ID`);
         continue;
       }
-      if (op.status !== undefined && op.status !== target2.status) {
+      if (op.status !== undefined && op.status !== target.status) {
         if (op.status !== "completed")
-          target2.verification = null;
+          target.verification = null;
         if (op.status !== "blocked")
-          target2.blocker = null;
+          target.blocker = null;
       }
       if (op.status !== undefined)
-        target2.status = op.status;
+        target.status = op.status;
       if (op.verification !== undefined)
-        target2.verification = op.verification;
+        target.verification = op.verification;
       if (op.blocker !== undefined)
-        target2.blocker = op.blocker;
+        target.blocker = op.blocker;
       continue;
     }
     if (op.status === undefined && op.evidence === undefined && op.blocker === undefined) {
       errors.push(`plan_ops[${index}].task_id (${op.task_id}): set_task requires a field to change`);
       continue;
     }
-    const target = next.phases.flatMap((phase2) => phase2.tasks).find((task2) => task2.id === op.task_id);
+    const target = next.phases.flatMap((phase) => phase.tasks).find((task) => task.id === op.task_id);
     if (!target) {
       errors.push(`plan_ops[${index}].task_id (${op.task_id}): unknown task ID`);
       continue;
@@ -172,14 +172,14 @@ function planError(path, message, before, after) {
 function planPath(path, input) {
   if (path[0] !== "phases" || typeof path[1] !== "number")
     return path.join(".") || "plan";
-  const phase2 = input.phases[path[1]];
-  if (!phase2)
+  const phase = input.phases[path[1]];
+  if (!phase)
     return path.join(".");
-  const prefix = `phases[${phase2.id}]`;
+  const prefix = `phases[${phase.id}]`;
   if (path[2] !== "tasks" || typeof path[3] !== "number")
     return `${prefix}${path.length > 2 ? `.${path.slice(2).join(".")}` : ""}`;
-  const task2 = phase2.tasks[path[3]];
-  return task2 ? `${prefix}.tasks[${task2.id}]${path.length > 4 ? `.${path.slice(4).join(".")}` : ""}` : path.join(".");
+  const task = phase.tasks[path[3]];
+  return task ? `${prefix}.tasks[${task.id}]${path.length > 4 ? `.${path.slice(4).join(".")}` : ""}` : path.join(".");
 }
 function planValidationErrors(input) {
   const parsed = GoalPlanInputSchema.safeParse(input);
@@ -192,13 +192,13 @@ function reviseGoalPlan(previous, input, expectedRevision, reason, now, revisitE
   const why = text.parse(reason);
   if (previous) {
     for (const newPhase of next.phases) {
-      const oldPhase = previous.phases.find((phase2) => phase2.id === newPhase.id);
+      const oldPhase = previous.phases.find((phase) => phase.id === newPhase.id);
       if (oldPhase?.status === "completed" && newPhase.status !== "completed")
         newPhase.verification = null;
       if (newPhase.status !== "blocked")
         newPhase.blocker = null;
       for (const newTask of newPhase.tasks) {
-        const oldTask = oldPhase?.tasks.find((task2) => task2.id === newTask.id);
+        const oldTask = oldPhase?.tasks.find((task) => task.id === newTask.id);
         if (oldTask?.status === "completed" && newTask.status !== "completed")
           newTask.evidence = null;
         if (newTask.status !== "blocked")
@@ -206,12 +206,12 @@ function reviseGoalPlan(previous, input, expectedRevision, reason, now, revisitE
       }
     }
   } else {
-    for (const phase2 of next.phases) {
-      if (phase2.status !== "blocked")
-        phase2.blocker = null;
-      for (const task2 of phase2.tasks)
-        if (task2.status !== "blocked")
-          task2.blocker = null;
+    for (const phase of next.phases) {
+      if (phase.status !== "blocked")
+        phase.blocker = null;
+      for (const task of phase.tasks)
+        if (task.status !== "blocked")
+          task.blocker = null;
     }
   }
   const violations = [...preflightErrors, ...planValidationErrors(next)];
@@ -220,9 +220,9 @@ function reviseGoalPlan(previous, input, expectedRevision, reason, now, revisitE
       violations.push(planError("completionCriteria", "preserve overall completion criteria; replace the goal for a new scope"));
     }
     for (const oldPhase of previous.phases) {
-      const newPhase = next.phases.find((phase2) => phase2.id === oldPhase.id);
+      const newPhase = next.phases.find((phase) => phase.id === oldPhase.id);
       if (!newPhase) {
-        if (oldPhase.status === "completed" || oldPhase.tasks.some((task2) => task2.status === "completed"))
+        if (oldPhase.status === "completed" || oldPhase.tasks.some((task) => task.status === "completed"))
           violations.push(planError(`phases[${oldPhase.id}]`, "preserve verified phase and task history"));
         else if (!revisitEvidence?.trim())
           violations.push(planError(`phases[${oldPhase.id}]`, "removing planned scope requires concrete revisit evidence"));
@@ -236,7 +236,7 @@ function reviseGoalPlan(previous, input, expectedRevision, reason, now, revisitE
         violations.push(planError(`phases[${oldPhase.id}].status`, "reopening a verified phase requires concrete revisit evidence"));
       }
       for (const oldTask of oldPhase.tasks) {
-        const newTask = newPhase.tasks.find((task2) => task2.id === oldTask.id);
+        const newTask = newPhase.tasks.find((task) => task.id === oldTask.id);
         if (oldTask.status !== "completed") {
           if ((!newTask || newTask.description !== oldTask.description) && !revisitEvidence?.trim())
             violations.push(planError(`phases[${oldPhase.id}].tasks[${oldTask.id}].description`, "removing or changing planned task scope requires concrete revisit evidence", oldTask.description, newTask?.description));
@@ -270,23 +270,23 @@ function reviseGoalPlan(previous, input, expectedRevision, reason, now, revisitE
   });
 }
 function goalPlanProgress(plan) {
-  const current = plan.phases.find((phase2) => phase2.status === "in_progress") ?? plan.phases.find((phase2) => phase2.status !== "completed");
-  const running = current?.tasks.find((task2) => task2.status === "in_progress");
-  const next = current?.tasks.find((task2) => task2.status === "pending");
+  const current = plan.phases.find((phase) => phase.status === "in_progress") ?? plan.phases.find((phase) => phase.status !== "completed");
+  const running = current?.tasks.find((task) => task.status === "in_progress");
+  const next = current?.tasks.find((task) => task.status === "pending");
   return {
     currentPhaseID: current?.id ?? null,
     currentTaskID: running?.id ?? null,
     nextTaskID: next?.id ?? null,
-    nextPhaseID: plan.phases.find((phase2) => phase2.id !== current?.id && phase2.status !== "completed")?.id ?? null,
-    completedPhaseIDs: plan.phases.filter((phase2) => phase2.status === "completed").map((phase2) => phase2.id),
-    completedTaskIDs: plan.phases.flatMap((phase2) => phase2.tasks.filter((task2) => task2.status === "completed").map((task2) => task2.id))
+    nextPhaseID: plan.phases.find((phase) => phase.id !== current?.id && phase.status !== "completed")?.id ?? null,
+    completedPhaseIDs: plan.phases.filter((phase) => phase.status === "completed").map((phase) => phase.id),
+    completedTaskIDs: plan.phases.flatMap((phase) => phase.tasks.filter((task) => task.status === "completed").map((task) => task.id))
   };
 }
 function goalPlanEntries(plan) {
-  return plan.phases.flatMap((phase2) => phase2.tasks.map((task2) => ({
-    content: `${phase2.objective}: ${task2.description}${task2.blocker ? ` \u2014 Blocked: ${task2.blocker}` : ""}`,
+  return plan.phases.flatMap((phase) => phase.tasks.map((task) => ({
+    content: `${phase.objective}: ${task.description}${task.blocker ? ` \u2014 Blocked: ${task.blocker}` : ""}`,
     priority: "medium",
-    status: task2.status === "blocked" ? "pending" : task2.status
+    status: task.status === "blocked" ? "pending" : task.status
   })));
 }
 
@@ -450,8 +450,8 @@ var ErrorDetails = z2.object({
 function diagnosticsLogPath() {
   return join2(dirname2(statePath()), "goal-plugin.log");
 }
-function clipped(text2) {
-  return text2.length > MAX_ENTRY_CHARS ? `${text2.slice(0, MAX_ENTRY_CHARS)}...` : text2;
+function clipped(text) {
+  return text.length > MAX_ENTRY_CHARS ? `${text.slice(0, MAX_ENTRY_CHARS)}...` : text;
 }
 function withPrivateLog(path, create, run) {
   const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW | constants.O_NONBLOCK | (create ? constants.O_CREAT : 0);
@@ -522,8 +522,8 @@ import { setTimeout as sleep } from "timers/promises";
 async function openConnection(file) {
   const specifier = process.versions.bun ? "bun:sqlite" : "node:sqlite";
   if (process.versions.bun) {
-    const sqlite2 = await import(specifier);
-    return new sqlite2.Database(file);
+    const sqlite = await import(specifier);
+    return new sqlite.Database(file);
   }
   const sqlite = await import(specifier);
   return new sqlite.DatabaseSync(file);
@@ -605,7 +605,7 @@ var MISSING_READ_RETRY_DELAY_MS = 2;
 var defaultStateReadOps = {
   platform: process.platform,
   readFile: (path) => readFile(path, "utf8"),
-  sleep: (ms) => new Promise((resolve2) => setTimeout(resolve2, ms))
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 };
 function isTransientReadError(error, platform) {
   const code = error?.code;
@@ -1088,11 +1088,11 @@ function nonNegativeInteger(value, fallback) {
 function nonNegativeIntegerOrNull(value) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
-function isClosed(status2) {
-  return status2 === "complete" || status2 === "unmet" || status2 === "cancelled";
+function isClosed(status) {
+  return status === "complete" || status === "unmet" || status === "cancelled";
 }
-function canContinue(status2) {
-  return status2 === "active";
+function canContinue(status) {
+  return status === "active";
 }
 function remainingTokens(goal) {
   return goal.tokenBudget == null ? null : Math.max(0, goal.tokenBudget - goal.tokensUsed);
@@ -1411,7 +1411,7 @@ async function createGoal(sessionID, objective, options) {
     return snapshot(goal);
   });
 }
-async function updateGoalObjective(sessionID, objective, status2 = "active", options) {
+async function updateGoalObjective(sessionID, objective, status = "active", options) {
   const value = validateObjective(objective, resolveMaxObjectiveChars(options?.maxObjectiveChars));
   const agent = typeof options?.agent === "string" && options.agent.trim() ? options.agent.trim() : null;
   const planModePause = options?.planModePause === true;
@@ -1430,7 +1430,7 @@ async function updateGoalObjective(sessionID, objective, status2 = "active", opt
       goal.planRevision += 1;
     }
     goal.objective = value;
-    goal.status = planModePause ? "paused" : status2;
+    goal.status = planModePause ? "paused" : status;
     goal.updatedAt = nowSeconds();
     goal.lastAccountedAt = goal.status === "active" ? goal.updatedAt : null;
     goal.completionEvidence = null;
@@ -1483,48 +1483,48 @@ async function pauseGoalForPlanMode(sessionID) {
     return snapshot(goal);
   });
 }
-async function setGoalStatus(sessionID, status2, agent, options) {
+async function setGoalStatus(sessionID, status, agent, options) {
   const agentValue = typeof agent === "string" && agent.trim() ? agent.trim() : null;
   const awaitingUserBlocker = options?.awaitingUserBlocker == null ? null : validateEvidence(options.awaitingUserBlocker, "awaiting-user blocker");
-  if (awaitingUserBlocker !== null && status2 !== "paused") {
+  if (awaitingUserBlocker !== null && status !== "paused") {
     throw new Error("awaiting-user blocker requires paused status");
   }
   return mutate((state) => {
     const goal = state.goals[sessionID];
     if (!goal)
       throw new Error("cannot update goal because this session has no goal");
-    if (status2 === "active" && options?.requireAwaitingUserResume === true && (goal.status === "paused" || goal.status === "budgetLimited" || goal.status === "usageLimited") && !(goal.status === "paused" && goal.stopReason === "awaiting user")) {
+    if (status === "active" && options?.requireAwaitingUserResume === true && (goal.status === "paused" || goal.status === "budgetLimited" || goal.status === "usageLimited") && !(goal.status === "paused" && goal.stopReason === "awaiting user")) {
       throw new Error("only an awaiting-user goal can resume without an explicit /goal resume or /resume_goal command");
     }
-    const interruptedResume = status2 === "active" && goal.status === "cancelled" && goal.stopReason === "interrupted" && options?.allowInterruptedResume === true;
+    const interruptedResume = status === "active" && goal.status === "cancelled" && goal.stopReason === "interrupted" && options?.allowInterruptedResume === true;
     if (isClosed(goal.status) && !interruptedResume)
       throw new Error("cannot update goal status because this goal is closed");
     if (awaitingUserBlocker !== null && goal.status !== "active") {
       throw new Error("cannot await user input because this goal is not active");
     }
-    if (goal.status === status2)
+    if (goal.status === status)
       return snapshot(goal);
-    if (status2 === "paused" && goal.status !== "active")
+    if (status === "paused" && goal.status !== "active")
       return snapshot(goal);
-    const resumesAutoTurnLimit = options?.resetAutoTurnLimit === true && status2 === "active" && goal.status === "usageLimited" && goal.stopReason?.startsWith(MAX_AUTO_CONTINUES_STOP_REASON_PREFIX) === true;
+    const resumesAutoTurnLimit = options?.resetAutoTurnLimit === true && status === "active" && goal.status === "usageLimited" && goal.stopReason?.startsWith(MAX_AUTO_CONTINUES_STOP_REASON_PREFIX) === true;
     accountWallClock(goal);
-    goal.status = status2;
+    goal.status = status;
     if (interruptedResume)
       goal.closedAt = null;
     goal.shellDeferrals = [];
     goal.updatedAt = nowSeconds();
-    goal.lastAccountedAt = status2 === "active" ? goal.updatedAt : null;
+    goal.lastAccountedAt = status === "active" ? goal.updatedAt : null;
     goal.autoTurns = resumesAutoTurnLimit ? 0 : goal.autoTurns;
-    goal.continuationFailures = status2 === "active" ? 0 : goal.continuationFailures;
-    goal.pendingAttempt = status2 === "active" ? null : goal.pendingAttempt;
-    goal.noProgressTurns = status2 === "active" ? 0 : goal.noProgressTurns;
-    goal.stopReason = status2 === "active" ? null : awaitingUserBlocker == null ? "paused" : "awaiting user";
-    goal.budgetWrapupSent = status2 === "active" ? false : goal.budgetWrapupSent;
-    goal.blocker = status2 === "active" ? null : awaitingUserBlocker ?? goal.blocker;
+    goal.continuationFailures = status === "active" ? 0 : goal.continuationFailures;
+    goal.pendingAttempt = status === "active" ? null : goal.pendingAttempt;
+    goal.noProgressTurns = status === "active" ? 0 : goal.noProgressTurns;
+    goal.stopReason = status === "active" ? null : awaitingUserBlocker == null ? "paused" : "awaiting user";
+    goal.budgetWrapupSent = status === "active" ? false : goal.budgetWrapupSent;
+    goal.blocker = status === "active" ? null : awaitingUserBlocker ?? goal.blocker;
     if (agentValue)
       goal.lastPromptAgent = agentValue;
-    goal.lastStatus = status2 === "active" ? "Goal resumed." : awaitingUserBlocker == null ? "Goal paused." : "Goal paused awaiting user input.";
-    pushHistory(goal, status2 === "active" ? "resumed" : "paused", goal.lastStatus);
+    goal.lastStatus = status === "active" ? "Goal resumed." : awaitingUserBlocker == null ? "Goal paused." : "Goal paused awaiting user input.";
+    pushHistory(goal, status === "active" ? "resumed" : "paused", goal.lastStatus);
     return snapshot(goal);
   });
 }
@@ -1536,7 +1536,7 @@ async function closeGoal(sessionID, input, maxObjectiveChars = DEFAULT_MAX_OBJEC
       throw new Error("cannot update goal because this session has no goal");
     if (isClosed(goal.status))
       throw new Error("cannot close goal because this goal is already closed");
-    if (input.status === "complete" && goal.plan?.phases.some((phase2) => phase2.status !== "completed")) {
+    if (input.status === "complete" && goal.plan?.phases.some((phase) => phase.status !== "completed")) {
       throw new Error("cannot complete the overall goal while planned phases still require work or verification");
     }
     accountWallClock(goal);
@@ -1694,8 +1694,8 @@ async function accountUsage(sessionID, tokensUsed, options) {
     return snapshot(goal);
   }, (result) => result !== null);
 }
-function normalizedStallSummary(text2) {
-  return text2.toLowerCase().replace(/\b\d+\b/g, "#").replace(/\s+/g, " ").trim();
+function normalizedStallSummary(text) {
+  return text.toLowerCase().replace(/\b\d+\b/g, "#").replace(/\s+/g, " ").trim();
 }
 async function recordAssistantProgress(sessionID, input) {
   return mutate((state) => {
@@ -1703,20 +1703,20 @@ async function recordAssistantProgress(sessionID, input) {
     if (!goal || goal.status !== "active")
       return goal ? snapshot(goal) : null;
     const waitingForShell = goal.shellDeferrals.some((item) => !item.delivered);
-    const text2 = input.text?.trim() ?? "";
+    const text = input.text?.trim() ?? "";
     const messageID = input.messageID?.trim() ?? "";
     const outputTokens = positiveIntegerOrNull(input.outputTokens) ?? 0;
     const threshold = positiveIntegerOrNull(input.noProgressTokenThreshold) ?? goal.noProgressTokenThreshold;
     const maxNoProgressTurns = positiveIntegerOrNull(input.maxNoProgressTurns) ?? goal.maxNoProgressTurns;
-    const summary = summarizeText(text2);
-    const substantive = /[\p{L}\p{N}]/u.test(text2);
+    const summary = summarizeText(text);
+    const substantive = /[\p{L}\p{N}]/u.test(text);
     const previousSummary = summarizeText(goal.lastAssistantText);
     const repeatedMessage = Boolean(messageID && messageID === goal.lastAssistantMessageID);
     const changed = Boolean(summary && summary !== previousSummary);
     if (summary && (!repeatedMessage || changed))
       recordCheckpoint(goal, summary);
-    if (text2)
-      goal.lastAssistantText = text2;
+    if (text)
+      goal.lastAssistantText = text;
     if (messageID)
       goal.lastAssistantMessageID = messageID;
     if (!waitingForShell && substantive && summary && (!repeatedMessage || changed)) {
@@ -1892,8 +1892,8 @@ async function markPendingContinuationStarted(sessionID) {
     return current ? snapshotInternal(current) : null;
   if (current.pendingAttempt == null || current.pendingAttempt.started)
     return snapshotInternal(current);
-  return mutate((state2) => {
-    const goal = state2.goals[sessionID];
+  return mutate((state) => {
+    const goal = state.goals[sessionID];
     if (!goal || goal.status !== "active")
       return goal ? snapshotInternal(goal) : null;
     if (goal.pendingAttempt == null || goal.pendingAttempt.started)
@@ -1903,7 +1903,7 @@ async function markPendingContinuationStarted(sessionID) {
     return snapshotInternal(goal);
   });
 }
-async function recordToolProgress(sessionID, text2, expectedAttemptID, substantiveTool = true) {
+async function recordToolProgress(sessionID, text, expectedAttemptID, substantiveTool = true) {
   let changed = false;
   return mutate((state) => {
     const goal = state.goals[sessionID];
@@ -1914,7 +1914,7 @@ async function recordToolProgress(sessionID, text2, expectedAttemptID, substanti
       goal.updatedAt = nowSeconds();
       changed = true;
     }
-    const value = text2?.trim() ?? "";
+    const value = text?.trim() ?? "";
     if (!value)
       return snapshotInternal(goal);
     if (goal.continuationFailures === 0 && goal.pendingAttempt == null)
@@ -1953,7 +1953,7 @@ function maybeStopForUsageLimit(goal, defaultMaxAutoTurns, now = nowSeconds()) {
   if (goal.status !== "active")
     return false;
   const effectiveMaxAutoTurns = goal.maxAutoTurns ?? defaultMaxAutoTurns;
-  if (effectiveMaxAutoTurns > 0 && goal.autoTurns >= effectiveMaxAutoTurns) {
+  if (effectiveMaxAutoTurns != null && effectiveMaxAutoTurns > 0 && goal.autoTurns >= effectiveMaxAutoTurns) {
     goal.status = "usageLimited";
     goal.lastAccountedAt = null;
     goal.stopReason = `${MAX_AUTO_CONTINUES_STOP_REASON_PREFIX}${effectiveMaxAutoTurns})`;
@@ -1996,8 +1996,8 @@ function pushHistory(goal, type, detail) {
     return;
   goal.history = [...goal.history, { type, detail: value, timestamp: nowSeconds() }].slice(-MAX_HISTORY_ENTRIES);
 }
-function summarizeText(text2, limit = CHECKPOINT_CHAR_LIMIT) {
-  const normalized = text2.replace(/\s+/g, " ").trim();
+function summarizeText(text, limit = CHECKPOINT_CHAR_LIMIT) {
+  const normalized = text.replace(/\s+/g, " ").trim();
   if (!normalized)
     return "";
   return normalized.length > limit ? `${normalized.slice(0, Math.max(0, limit - 3))}...` : normalized;
@@ -2010,8 +2010,8 @@ function goalLimitSummary(goal) {
   ].filter(Boolean);
   return limits.length ? `Goal set with ${limits.join(", ")}.` : "Goal set with default continuation limits.";
 }
-function estimateTokensFromText(text2) {
-  return Math.ceil(text2.length / 4);
+function estimateTokensFromText(text) {
+  return Math.ceil(text.length / 4);
 }
 
 // src/i18n.ts
@@ -2252,8 +2252,8 @@ var STATUS_PRESENTATIONS = {
     cancelled: "\u5DF2\u53D6\u6D88"
   }
 };
-function presentGoalStatus(status2, locale) {
-  return STATUS_PRESENTATIONS[locale][status2] ?? status2;
+function presentGoalStatus(status, locale) {
+  return STATUS_PRESENTATIONS[locale][status] ?? status;
 }
 function presentGoalStopReason(reason, locale) {
   if (locale !== "zh-CN")
@@ -2287,9 +2287,9 @@ function presentGoalStopReason(reason, locale) {
     return `\u5DF2\u8FBE\u5230\u6301\u7EED\u65F6\u95F4\u4E0A\u9650\uFF08${duration[1]} \u79D2\uFF09`;
   return reason;
 }
-function presentGoalLastStatus(status2, locale) {
+function presentGoalLastStatus(status, locale) {
   if (locale !== "zh-CN")
-    return status2;
+    return status;
   const direct = {
     "Goal set.": "\u76EE\u6807\u5DF2\u8BBE\u7F6E\u3002",
     "Goal recorded from Plan mode; execution paused until resumed from Build mode.": "\u76EE\u6807\u5DF2\u5728 Plan \u6A21\u5F0F\u4E0B\u8BB0\u5F55\uFF1B\u6267\u884C\u5DF2\u6682\u505C\uFF0C\u9700\u5728 Build \u6A21\u5F0F\u4E0B\u7EE7\u7EED\u3002",
@@ -2310,30 +2310,30 @@ function presentGoalLastStatus(status2, locale) {
     "Auto-continue prompt failed repeatedly. Resume the goal to retry.": "\u81EA\u52A8\u7EE7\u7EED\u63D0\u793A\u53CD\u590D\u5931\u8D25\u3002\u8BF7\u7EE7\u7EED\u76EE\u6807\u540E\u91CD\u8BD5\u3002",
     "Goal execution is paused while the session is in Plan mode. Switch to Build mode and resume the goal to continue.": "\u4F1A\u8BDD\u5904\u4E8E Plan \u6A21\u5F0F\uFF0C\u56E0\u6B64\u76EE\u6807\u6267\u884C\u5DF2\u6682\u505C\u3002\u8BF7\u5207\u6362\u5230 Build \u6A21\u5F0F\u5E76\u7EE7\u7EED\u76EE\u6807\u3002"
   };
-  if (direct[status2])
-    return direct[status2];
+  if (direct[status])
+    return direct[status];
   const lowProgressPausePattern = /^Auto-continue paused after (\d+) low-progress continuation turn\(s\)\. Resume the goal to retry\.$/;
-  const lowProgressPause = lowProgressPausePattern.exec(status2);
+  const lowProgressPause = lowProgressPausePattern.exec(status);
   if (lowProgressPause)
     return `\u81EA\u52A8\u7EE7\u7EED\u5DF2\u5728 ${lowProgressPause[1]} \u4E2A\u4F4E\u8FDB\u5C55\u8F6E\u6B21\u540E\u6682\u505C\u3002\u8BF7\u7EE7\u7EED\u76EE\u6807\u540E\u91CD\u8BD5\u3002`;
-  const lowProgress = /^Low-progress continuation turn detected \((\d+)\/(\d+|unbounded)\)\.$/.exec(status2);
+  const lowProgress = /^Low-progress continuation turn detected \((\d+)\/(\d+|unbounded)\)\.$/.exec(status);
   if (lowProgress) {
     const limit = lowProgress[2] === "unbounded" ? "\u4E0D\u9650" : lowProgress[2];
     return `\u68C0\u6D4B\u5230\u4F4E\u8FDB\u5C55\u7684\u7EE7\u7EED\u8F6E\u6B21\uFF08${lowProgress[1]}/${limit}\uFF09\u3002`;
   }
-  const reserved = /^Auto-continue (\d+) reserved\.$/.exec(status2);
+  const reserved = /^Auto-continue (\d+) reserved\.$/.exec(status);
   if (reserved)
     return `\u5DF2\u9884\u7559\u7B2C ${reserved[1]} \u6B21\u81EA\u52A8\u7EE7\u7EED\u3002`;
-  const failed = /^Auto-continue failed (\d+) time\(s\)\.$/.exec(status2);
+  const failed = /^Auto-continue failed (\d+) time\(s\)\.$/.exec(status);
   if (failed)
     return `\u81EA\u52A8\u7EE7\u7EED\u5DF2\u5931\u8D25 ${failed[1]} \u6B21\u3002`;
-  const pausedAfterFailures = /^Paused after (\d+) auto-continue failure\(s\)\.$/.exec(status2);
+  const pausedAfterFailures = /^Paused after (\d+) auto-continue failure\(s\)\.$/.exec(status);
   if (pausedAfterFailures)
     return `\u5DF2\u5728 ${pausedAfterFailures[1]} \u6B21\u81EA\u52A8\u7EE7\u7EED\u5931\u8D25\u540E\u6682\u505C\u3002`;
-  const wrapUp = /^(.*); wrap-up required\.$/.exec(status2);
+  const wrapUp = /^(.*); wrap-up required\.$/.exec(status);
   if (wrapUp)
     return `${presentGoalStopReason(wrapUp[1], locale)}\uFF1B\u9700\u8981\u6536\u5C3E\u3002`;
-  return status2;
+  return status;
 }
 var HISTORY_TYPE_PRESENTATIONS = {
   en: {},
@@ -2424,11 +2424,11 @@ ${escapeXmlText(goal.objective)}
 function durablePlanContext(goal) {
   if (!goal.plan)
     return "";
-  const phase2 = goal.plan.phases.find((item) => item.id === goal.planProgress?.currentPhaseID);
-  const currentTask = phase2?.tasks.find((item) => item.id === goal.planProgress?.currentTaskID);
-  const nextTask = phase2?.tasks.find((item) => item.id === goal.planProgress?.nextTaskID);
-  const blockedTasks = phase2?.tasks.filter((item) => item.status === "blocked") ?? [];
-  const taskSummary = (task2) => task2 ? { id: task2.id, description: task2.description, status: task2.status, blocker: task2.blocker ?? null } : null;
+  const phase = goal.plan.phases.find((item) => item.id === goal.planProgress?.currentPhaseID);
+  const currentTask = phase?.tasks.find((item) => item.id === goal.planProgress?.currentTaskID);
+  const nextTask = phase?.tasks.find((item) => item.id === goal.planProgress?.nextTaskID);
+  const blockedTasks = phase?.tasks.filter((item) => item.status === "blocked") ?? [];
+  const taskSummary = (task) => task ? { id: task.id, description: task.description, status: task.status, blocker: task.blocker ?? null } : null;
   return `
 
 <untrusted_goal_plan>
@@ -2438,7 +2438,7 @@ ${escapeXmlText(JSON.stringify({
     summary: goal.plan.summary,
     completionCriteria: goal.plan.completionCriteria,
     progress: goal.planProgress,
-    currentPhase: phase2 ? { id: phase2.id, objective: phase2.objective, status: phase2.status, blocker: phase2.blocker ?? null } : null,
+    currentPhase: phase ? { id: phase.id, objective: phase.objective, status: phase.status, blocker: phase.blocker ?? null } : null,
     currentTask: taskSummary(currentTask),
     nextTask: taskSummary(nextTask),
     blockedTasks: blockedTasks.slice(0, 3).map(taskSummary),
@@ -2470,10 +2470,12 @@ var PLAN_POLICY_ZH_CN = [
 var CONTINUATION_BEHAVIOR_EN = `Continuation behavior:
 - This goal persists across turns. Ending this turn does not require shrinking the objective to what fits now.
 - Keep the full objective intact. If it cannot be finished now, make concrete progress toward the real requested end state.
+- Keep this main thread small: do tiny edits directly, but delegate anything big, exploratory, or output-heavy to subagents and bring back only a short report plus file paths. Never paste large logs or file dumps here.
 - Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.`;
 var CONTINUATION_BEHAVIOR_ZH_CN = `\u7EE7\u7EED\u6267\u884C\u89C4\u5219\uFF1A
 - \u6B64\u76EE\u6807\u4F1A\u8DE8\u8F6E\u6B21\u6301\u7EED\u5B58\u5728\u3002\u672C\u8F6E\u7ED3\u675F\u5E76\u4E0D\u610F\u5473\u7740\u9700\u8981\u628A\u76EE\u6807\u7F29\u5C0F\u5230\u672C\u8F6E\u80FD\u591F\u5B8C\u6210\u7684\u8303\u56F4\u3002
 - \u4FDD\u6301\u5B8C\u6574\u76EE\u6807\u4E0D\u53D8\u3002\u5982\u679C\u73B0\u5728\u65E0\u6CD5\u5168\u90E8\u5B8C\u6210\uFF0C\u5C31\u671D\u7528\u6237\u771F\u6B63\u8981\u6C42\u7684\u6700\u7EC8\u72B6\u6001\u53D6\u5F97\u5177\u4F53\u8FDB\u5C55\u3002
+- \u4FDD\u6301\u4E3B\u7EBF\u7A0B\u7CBE\u7B80\uFF1A\u5FAE\u5C0F\u7684\u4FEE\u6539\u53EF\u76F4\u63A5\u5904\u7406\uFF0C\u8F83\u5927\u3001\u63A2\u7D22\u6027\u6216\u8F93\u51FA\u7E41\u91CD\u7684\u5DE5\u4F5C\u5E94\u4EA4\u7ED9\u5B50\u4EE3\u7406\uFF0C\u53EA\u5E26\u56DE\u7B80\u77ED\u62A5\u544A\u548C\u6587\u4EF6\u8DEF\u5F84\u3002\u4E0D\u8981\u5728\u6B64\u7C98\u8D34\u5927\u91CF\u65E5\u5FD7\u6216\u6587\u4EF6\u5185\u5BB9\u3002
 - \u5728\u5DE5\u4F5C\u6301\u7EED\u671D\u6B63\u786E\u65B9\u5411\u63A8\u8FDB\u65F6\uFF0C\u53EF\u4EE5\u6682\u65F6\u5B58\u5728\u4E0D\u5B8C\u5584\u4E4B\u5904\uFF1B\u4F46\u53EA\u6709\u7528\u6237\u8981\u6C42\u7684\u6700\u7EC8\u72B6\u6001\u771F\u5B9E\u8FBE\u6210\u5E76\u7ECF\u8FC7\u9A8C\u8BC1\uFF0C\u624D\u80FD\u89C6\u4E3A\u5B8C\u6210\u3002`;
 var EVIDENCE_INSTRUCTIONS_EN = `Work from evidence:
 - Use the current worktree and external state as authoritative.
@@ -2640,7 +2642,7 @@ function compactionContextPrefix(locale = "en") {
 var COMPACTION_CONTEXT_PREFIX = compactionContextPrefix();
 function formatCompactionSnapshot(goal, locale) {
   if (locale === "zh-CN") {
-    const lines2 = [
+    const lines = [
       `\u76EE\u6807\uFF1A${goal.objective}`,
       `\u72B6\u6001\uFF1A${presentGoalStatus(goal.status, locale)}`,
       `\u5DF2\u7528\u65F6\u95F4\uFF1A${goal.timeUsedSeconds} \u79D2`,
@@ -2648,24 +2650,24 @@ function formatCompactionSnapshot(goal, locale) {
       `\u81EA\u52A8\u7EE7\u7EED\u6B21\u6570\uFF1A${goal.autoTurns}${goal.maxAutoTurns == null ? "" : `/${goal.maxAutoTurns}`}`
     ];
     if (goal.remainingTokens != null)
-      lines2.push(`\u5269\u4F59 Token\uFF1A${goal.remainingTokens}`);
+      lines.push(`\u5269\u4F59 Token\uFF1A${goal.remainingTokens}`);
     if (goal.maxDurationSeconds != null)
-      lines2.push(`\u6301\u7EED\u65F6\u95F4\u4E0A\u9650\uFF1A${goal.maxDurationSeconds} \u79D2`);
+      lines.push(`\u6301\u7EED\u65F6\u95F4\u4E0A\u9650\uFF1A${goal.maxDurationSeconds} \u79D2`);
     if (goal.noProgressTurns > 0)
-      lines2.push(`\u65E0\u8FDB\u5C55\u8F6E\u6570\uFF1A${goal.noProgressTurns}`);
+      lines.push(`\u65E0\u8FDB\u5C55\u8F6E\u6570\uFF1A${goal.noProgressTurns}`);
     if (goal.lastCheckpoint)
-      lines2.push(`\u6700\u65B0\u68C0\u67E5\u70B9\uFF1A${goal.lastCheckpoint.summary}`);
+      lines.push(`\u6700\u65B0\u68C0\u67E5\u70B9\uFF1A${goal.lastCheckpoint.summary}`);
     if (goal.lastStatus)
-      lines2.push(`\u6700\u8FD1\u72B6\u6001\uFF1A${presentGoalLastStatus(goal.lastStatus, locale)}`);
+      lines.push(`\u6700\u8FD1\u72B6\u6001\uFF1A${presentGoalLastStatus(goal.lastStatus, locale)}`);
     if (goal.stopReason)
-      lines2.push(`\u505C\u6B62\u539F\u56E0\uFF1A${presentGoalStopReason(goal.stopReason, locale)}`);
+      lines.push(`\u505C\u6B62\u539F\u56E0\uFF1A${presentGoalStopReason(goal.stopReason, locale)}`);
     if (goal.completionEvidence)
-      lines2.push(`\u5B8C\u6210\u8BC1\u636E\uFF1A${goal.completionEvidence}`);
+      lines.push(`\u5B8C\u6210\u8BC1\u636E\uFF1A${goal.completionEvidence}`);
     if (goal.blocker)
-      lines2.push(`\u963B\u585E\u539F\u56E0\uFF1A${presentGoalLastStatus(goal.blocker, locale)}`);
+      lines.push(`\u963B\u585E\u539F\u56E0\uFF1A${presentGoalLastStatus(goal.blocker, locale)}`);
     if (goal.plan)
-      lines2.push(`\u8BA1\u5212\uFF1A${JSON.stringify({ plan: goal.plan, progress: goal.planProgress })}`);
-    return lines2.join(`
+      lines.push(`\u8BA1\u5212\uFF1A${JSON.stringify({ plan: goal.plan, progress: goal.planProgress })}`);
+    return lines.join(`
 `);
   }
   const lines = [
@@ -2727,7 +2729,7 @@ Preserve the goal objective, status, elapsed time, budget usage, latest checkpoi
 }
 
 // src/server.ts
-var DEFAULT_MAX_AUTO_TURNS = 25;
+var DEFAULT_MAX_AUTO_TURNS = null;
 var DEFAULT_CONTINUE_INTERVAL_SECONDS = 3;
 var DEFAULT_MAX_PROMPT_FAILURES = 3;
 var DEFAULT_COMMAND_NAME = "goal";
@@ -2740,6 +2742,8 @@ var MAX_TIMER_DELAY_MS = 2147483647;
 var STALE_PENDING_MS = 30000;
 var RETRY_SETTLE_MS = 25;
 var TRANSPORT_ERROR_PATTERN = /\b(?:network|fetch|socket|connect|connection|timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|transport|stream|websocket|offline|internet|request failed|proxy)\b/i;
+var RATE_LIMIT_ERROR_PATTERN = /\b(?:rate.?limit|rate.?limited|quota|quota.?exceeded|too.?many.?requests|429|burst|burst.?cap|throttl(?:ed|ing)|capacity|overloaded|server.?busy|temporarily.?unavailable|503)\b/i;
+var OVERFLOW_ERROR_PATTERN = /\b(?:context.?length|context.?window|too.?long|too.?large|maximum.?context|token.?(?:limit|count).?exceed|input.?too.?long|invalid.?request.*too|request.?too.?large|payload.?too.?large|model.?unavailable|model.?not.?found)\b/i;
 var NON_TRANSPORT_TERMINAL_PATTERN = /\b(?:abort(?:ed)?|interrupt(?:ed|ion)?)\b/i;
 var NON_PROGRESS_TOOLS = new Set(["get_goal", "get_goal_history", "list_all_goals", "defer_goal_until_shell", "release_goal_shell_deferral"]);
 var NON_SUBSTANTIVE_TOOLS = new Set(["update_goal_plan", "update_goal_objective", "update_goal", "update_goal_status", "create_goal", "set_goal", "stop_goal", "replace_goal", "clear_goal", "todowrite"]);
@@ -2769,11 +2773,11 @@ class ContinuationEpochs {
     control.epoch++;
     this.wake(control);
   }
-  async decidePause(sessionID, mutate2, commitStop) {
+  async decidePause(sessionID, mutate, commitStop) {
     const control = this.control(sessionID);
     control.pending++;
     try {
-      const result = await mutate2();
+      const result = await mutate();
       if (!this.disposed)
         commitStop();
       return result;
@@ -2853,7 +2857,8 @@ $ARGUMENTS
   \u76EE\u6807\u5FC5\u987B\u5B8C\u6574\u5FE0\u5B9E\u5730\u8868\u8FBE\u53C2\u6570\u4E2D\u7684\u6BCF\u9879\u8981\u6C42\u3001\u7EA6\u675F\u3001\u8303\u56F4\u8FB9\u754C\u548C\u6210\u529F\u6807\u51C6\uFF0C\u4E0D\u5F97\u9057\u6F0F\u6216\u538B\u7F29\u542B\u4E49\u3002
   \u53EF\u4EE5\u4E3A\u4E86\u6E05\u6670\u548C\u8FDE\u8D2F\u8C03\u6574\u7ED3\u6784\u548C\u63AA\u8F9E\uFF0C\u4F46\u4E0D\u8981\u622A\u65AD\u3001\u5220\u9664\u5185\u5BB9\uFF0C\u4E5F\u4E0D\u8981\u7528\u5916\u90E8\u6587\u4EF6\u5F15\u7528\u66FF\u4EE3\u5B9E\u9645\u5185\u5BB9\u3002
   \u5982\u679C\u7528\u6237\u660E\u786E\u7ED9\u51FA\u9884\u7B97\u8981\u6C42\uFF0C\u5E94\u901A\u8FC7 token_budget\u3001max_auto_turns \u6216 max_duration_seconds \u4F20\u7ED9 create_goal\uFF0C
-  \u800C\u4E0D\u662F\u628A\u8FD9\u4E9B\u9884\u7B97\u6587\u5B57\u7559\u5728 objective \u4E2D\u3002
+  \u800C\u4E0D\u662F\u628A\u8FD9\u4E9B\u9884\u7B97\u6587\u5B57\u7559\u5728 objective \u4E2D\u3002\u4F8B\u5982\u201C\u6700\u591A 100 \u8F6E\u201D\u5373\u8BBE\u7F6E max_auto_turns\uFF1B
+  \u81EA\u52A8\u7EE7\u7EED\u9ED8\u8BA4\u4E0D\u9650\u8F6E\u6570\uFF0C\u53EA\u6709\u7528\u6237\u8981\u6C42\u65F6\u624D\u8BBE\u7F6E\u4E0A\u9650\u3002
 
 \u53EA\u80FD\u6839\u636E\u8FD9\u4E9B\u660E\u786E\u7684\u547D\u4EE4\u53C2\u6570\u521B\u5EFA\u76EE\u6807\u3002\u4E0D\u8981\u4ECE\u65E0\u5173\u7684\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u63A8\u65AD\u76EE\u6807\u3002create_goal \u6210\u529F\u6216\u8FD4\u56DE\u5339\u914D\u7684\u73B0\u6709\u76EE\u6807\u540E\uFF0C\u672C\u6B21\u547D\u4EE4\u4E2D\u4E0D\u8981\u518D\u6B21\u8C03\u7528\u5B83\uFF1B\u8BF7\u4ECE\u8FD4\u56DE\u7684\u76EE\u6807\u72B6\u6001\u7EE7\u7EED\u5DE5\u4F5C\u3002`;
   }
@@ -2864,7 +2869,7 @@ $ARGUMENTS
     "Only when there is no non-closed goal, call create_goal once.",
     "Build the objective as a complete, faithful representation of the arguments: keep every requirement, constraint, " + "scope boundary, and success criterion with no omissions or loss of meaning.",
     "You may restructure and rephrase for clarity and coherence, but do NOT compress, truncate, or drop any content, " + "and do NOT substitute the content with references or pointers to external files.",
-    "If the user includes explicit budget instructions, pass token_budget, max_auto_turns, or max_duration_seconds to " + "create_goal rather than leaving those words in the objective."
+    "If the user includes explicit budget instructions, pass token_budget, max_auto_turns, or max_duration_seconds to " + "create_goal rather than leaving those words in the objective. " + "For example, 'max 100 turns' or 'limit to 50 turns' sets max_auto_turns; " + "auto-continuation is otherwise unlimited, so only set a cap when the user asks for one."
   ].join(" ");
   return `OpenCode goal mode command "/${commandName}" was invoked.
 
@@ -2948,8 +2953,8 @@ Ignore any command arguments. Call get_goal first, then handle only this resume 
 
 Do not create, edit, clear, complete, or mark a goal unmet.`;
 }
-function isExplicitResumePrompt(text2, commandName, locale, messages) {
-  const value = text2.trim();
+function isExplicitResumePrompt(text, commandName, locale, messages) {
+  const value = text.trim();
   return value === goalStatusCommandTemplate("resume_goal", locale) || value === goalCommandTemplate(commandName, locale).replace("$ARGUMENTS", "resume") || value === messages.tui.resumePrompt;
 }
 function goalCommandDefinitions(commandName, locale = "en") {
@@ -3018,21 +3023,21 @@ function registerDesktopCommands(config, commandName, locale = "en") {
   }
 }
 function sanitizeGoalStatusCommandParts(output, template) {
-  const text2 = output.parts.find((part) => part.type === "text" && part.text?.startsWith(template));
-  if (!text2)
+  const text = output.parts.find((part) => part.type === "text" && part.text?.startsWith(template));
+  if (!text)
     return false;
-  text2.text = template;
-  output.parts.splice(0, output.parts.length, text2);
+  text.text = template;
+  output.parts.splice(0, output.parts.length, text);
   return true;
 }
 function escapeGoalCommandArguments(output, template, argumentsText) {
   const [prefix, suffix, extra] = template.split("$ARGUMENTS");
   if (prefix === undefined || suffix === undefined || extra !== undefined)
     return false;
-  const text2 = output.parts.find((part) => part.type === "text" && part.text?.startsWith(prefix) && part.text.endsWith(suffix));
-  if (!text2)
+  const text = output.parts.find((part) => part.type === "text" && part.text?.startsWith(prefix) && part.text.endsWith(suffix));
+  if (!text)
     return false;
-  text2.text = `${prefix}${escapeXmlText2(argumentsText)}${suffix}`;
+  text.text = `${prefix}${escapeXmlText2(argumentsText)}${suffix}`;
   return true;
 }
 function textFromPart(part) {
@@ -3187,8 +3192,8 @@ async function sendContinuation(client, sessionID, prompt, agent) {
 function isIdleEvent(event) {
   if (event.type === "session.idle")
     return true;
-  const status2 = event.properties?.status;
-  return event.type === "session.status" && typeof status2 === "object" && status2 !== null && status2.type === "idle";
+  const status = event.properties?.status;
+  return event.type === "session.status" && typeof status === "object" && status !== null && status.type === "idle";
 }
 function isTransportError(error) {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
@@ -3197,6 +3202,36 @@ function isTransportError(error) {
   if (TRANSPORT_ERROR_PATTERN.test(message))
     return true;
   return false;
+}
+function errorText(error) {
+  return error instanceof Error ? error.message : typeof error === "string" ? error : "";
+}
+function isRateLimitError(error) {
+  const message = errorText(error);
+  if (!message || NON_TRANSPORT_TERMINAL_PATTERN.test(message))
+    return false;
+  return RATE_LIMIT_ERROR_PATTERN.test(message);
+}
+function isOverflowError(error) {
+  const message = errorText(error);
+  if (!message || NON_TRANSPORT_TERMINAL_PATTERN.test(message))
+    return false;
+  return OVERFLOW_ERROR_PATTERN.test(message);
+}
+var RATE_LIMIT_BACKOFF_BASE_MS = 5000;
+var OVERFLOW_RETRY_DELAY_MS = 60000;
+var MAX_RETRY_BACKOFF_MS = 300000;
+function retryBackoffMs(consecutiveFailures) {
+  const failures = Math.max(0, Math.floor(consecutiveFailures));
+  return Math.min(MAX_RETRY_BACKOFF_MS, failures * failures * RATE_LIMIT_BACKOFF_BASE_MS);
+}
+function pressuredRetryDelayMs(error, minIntervalSeconds, attemptAt, consecutiveFailures, now = Date.now()) {
+  const base = continuationRetryDelayMs(minIntervalSeconds, attemptAt, now);
+  if (isRateLimitError(error))
+    return base + retryBackoffMs(consecutiveFailures);
+  if (isOverflowError(error))
+    return OVERFLOW_RETRY_DELAY_MS + retryBackoffMs(consecutiveFailures);
+  return base;
 }
 function transportErrorMessageFromEvent(props) {
   for (const candidate of [props.error, props.message, props.reason]) {
@@ -3263,7 +3298,7 @@ function toolOutputFailed(output) {
     return true;
   if (output.success === false)
     return true;
-  const text2 = typeof output.output === "string" ? output.output.trim() : "";
+  const text = typeof output.output === "string" ? output.output.trim() : "";
   const state = output.state ?? output.status;
   if (typeof state === "string") {
     const normalized = state.trim().toLowerCase();
@@ -3277,19 +3312,19 @@ function toolOutputFailed(output) {
     if (typeof metaState === "string" && TOOL_FAILURE_STATES.has(metaState.trim().toLowerCase()))
       return true;
   }
-  const taskState = parseTaskState(text2);
+  const taskState = parseTaskState(text);
   if (taskState)
     return taskState !== "completed";
-  if (/^state:\s*(failed|failure|error|cancelled|canceled|aborted|abort|interrupted|running|pending|incomplete|partial|timeout|timed_out)\b/im.test(text2))
+  if (/^state:\s*(failed|failure|error|cancelled|canceled|aborted|abort|interrupted|running|pending|incomplete|partial|timeout|timed_out)\b/im.test(text))
     return true;
-  if (/^<error>/i.test(text2) || /^<tool-error>/i.test(text2) || /^error:/i.test(text2))
+  if (/^<error>/i.test(text) || /^<tool-error>/i.test(text) || /^error:/i.test(text))
     return true;
   return false;
 }
-function taskBlockExpired(task2, maxBlockMs, now) {
+function taskBlockExpired(task, maxBlockMs, now) {
   if (maxBlockMs == null)
     return false;
-  const blockingSince = task2.state === "running" ? task2.runningSince : task2.terminalAt;
+  const blockingSince = task.state === "running" ? task.runningSince : task.terminalAt;
   return blockingSince != null && now - blockingSince >= maxBlockMs;
 }
 function sessionIDFromEvent(event) {
@@ -3356,14 +3391,14 @@ class TaskTracker {
       this.pendingTaskCalls.delete(input.callID);
     if (typeof parentSessionID !== "string")
       return;
-    const status2 = parseTaskStatus(output.output);
-    if (!status2)
+    const status = parseTaskStatus(output.output);
+    if (!status)
       return;
-    if (status2.state === "running") {
-      this.markRunning(parentSessionID, status2.taskID);
+    if (status.state === "running") {
+      this.markRunning(parentSessionID, status.taskID);
       return;
     }
-    this.markTerminal(status2.taskID, status2.state, parentSessionID, { resetReconciled: true });
+    this.markTerminal(status.taskID, status.state, parentSessionID, { resetReconciled: true });
   }
   observeSessionCreated(event) {
     const info = event.properties?.info;
@@ -3371,22 +3406,22 @@ class TaskTracker {
       return;
     this.markRunning(info.parentID, info.id);
   }
-  observeSessionStatus(sessionID, status2) {
-    const task2 = this.tasks.get(sessionID);
-    if (!task2)
+  observeSessionStatus(sessionID, status) {
+    const task = this.tasks.get(sessionID);
+    if (!task)
       return;
-    if (status2 === "busy") {
-      this.markRunning(task2.parentSessionID, sessionID);
+    if (status === "busy") {
+      this.markRunning(task.parentSessionID, sessionID);
       return;
     }
-    if (status2 === "idle")
-      this.markTerminal(sessionID, "completed", task2.parentSessionID);
+    if (status === "idle")
+      this.markTerminal(sessionID, "completed", task.parentSessionID);
   }
   observeSessionDeleted(sessionID) {
     this.tasks.delete(sessionID);
-    for (const task2 of this.tasks.values()) {
-      if (task2.parentSessionID === sessionID)
-        this.tasks.delete(task2.taskID);
+    for (const task of this.tasks.values()) {
+      if (task.parentSessionID === sessionID)
+        this.tasks.delete(task.taskID);
     }
     this.latestAssistantBySession.delete(sessionID);
     this.clearSnapshotIdleForSession(sessionID);
@@ -3402,13 +3437,13 @@ class TaskTracker {
         continue;
       }
       for (const part of message.parts ?? []) {
-        const status2 = parseTaskStatus(textFromPart(part));
-        if (!status2)
+        const status = parseTaskStatus(textFromPart(part));
+        if (!status)
           continue;
-        if (status2.state === "running")
-          this.markRunning(sessionID, status2.taskID);
+        if (status.state === "running")
+          this.markRunning(sessionID, status.taskID);
         else
-          this.markTerminal(status2.taskID, status2.state, sessionID, { resetReconciled: true });
+          this.markTerminal(status.taskID, status.state, sessionID, { resetReconciled: true });
       }
     }
   }
@@ -3432,25 +3467,25 @@ class TaskTracker {
           continue;
         if (entry.state.status === "streaming" || entry.state.status === "running")
           continue;
-        const status2 = parseTaskStatus(toolTextFromV2Content(entry.state.content ?? []));
-        if (!status2)
+        const status = parseTaskStatus(toolTextFromV2Content(entry.state.content ?? []));
+        if (!status)
           continue;
-        if (status2.state === "running")
-          this.markRunning(parentSessionID, status2.taskID);
+        if (status.state === "running")
+          this.markRunning(parentSessionID, status.taskID);
         else
-          this.markTerminal(status2.taskID, status2.state, parentSessionID, { resetReconciled: true, terminalAt });
+          this.markTerminal(status.taskID, status.state, parentSessionID, { resetReconciled: true, terminalAt });
       }
     }
   }
   hasBlockingTasks(parentSessionID, maxBlockMs = null) {
     this.pruneExpiredSnapshotIdleHolds();
     const now = Date.now();
-    for (const task2 of this.tasks.values()) {
-      if (task2.parentSessionID !== parentSessionID)
+    for (const task of this.tasks.values()) {
+      if (task.parentSessionID !== parentSessionID)
         continue;
-      if (task2.state !== "running" && !task2.terminalUnreconciled)
+      if (task.state !== "running" && !task.terminalUnreconciled)
         continue;
-      if (taskBlockExpired(task2, maxBlockMs, now))
+      if (taskBlockExpired(task, maxBlockMs, now))
         continue;
       return true;
     }
@@ -3493,8 +3528,8 @@ class TaskTracker {
       return;
     }
     for (const childID of childIDs) {
-      const status2 = statuses[childID];
-      const statusType = isRecord(status2) && typeof status2.type === "string" ? status2.type : undefined;
+      const status = statuses[childID];
+      const statusType = isRecord(status) && typeof status.type === "string" ? status.type : undefined;
       if (statusType === "busy")
         this.markRunning(parentSessionID, childID);
       else if (statusType === "idle") {
@@ -3572,16 +3607,16 @@ class TaskTracker {
         continue;
       this.snapshotIdleHolds.delete(key);
       this.settledSnapshotIdleTasks.add(key);
-      const task2 = this.tasks.get(hold.taskID);
-      if (task2?.parentSessionID === hold.parentSessionID && task2.state === "running")
+      const task = this.tasks.get(hold.taskID);
+      if (task?.parentSessionID === hold.parentSessionID && task.state === "running")
         this.tasks.delete(hold.taskID);
     }
   }
   markAbsentRunningChildren(parentSessionID, liveChildIDs) {
-    for (const task2 of this.tasks.values()) {
-      if (task2.parentSessionID !== parentSessionID || task2.state !== "running" || liveChildIDs.has(task2.taskID))
+    for (const task of this.tasks.values()) {
+      if (task.parentSessionID !== parentSessionID || task.state !== "running" || liveChildIDs.has(task.taskID))
         continue;
-      this.markSnapshotIdle(parentSessionID, task2.taskID);
+      this.markSnapshotIdle(parentSessionID, task.taskID);
     }
   }
   snapshotIdleKey(parentSessionID, taskID) {
@@ -3589,18 +3624,18 @@ class TaskTracker {
   }
   observeAssistant(sessionID, marker) {
     this.latestAssistantBySession.set(sessionID, marker);
-    for (const task2 of this.tasks.values()) {
-      if (task2.parentSessionID !== sessionID || !task2.terminalUnreconciled)
+    for (const task of this.tasks.values()) {
+      if (task.parentSessionID !== sessionID || !task.terminalUnreconciled)
         continue;
-      if (this.assistantReconcilesTask(task2, marker)) {
-        this.tasks.set(task2.taskID, { ...task2, terminalUnreconciled: false });
+      if (this.assistantReconcilesTask(task, marker)) {
+        this.tasks.set(task.taskID, { ...task, terminalUnreconciled: false });
       }
     }
   }
-  assistantReconcilesTask(task2, marker) {
-    if (marker.id && task2.lastAssistantMessageIDAtTerminal && marker.id !== task2.lastAssistantMessageIDAtTerminal)
+  assistantReconcilesTask(task, marker) {
+    if (marker.id && task.lastAssistantMessageIDAtTerminal && marker.id !== task.lastAssistantMessageIDAtTerminal)
       return true;
-    if (marker.completedAt != null && task2.terminalAt != null && marker.completedAt >= task2.terminalAt)
+    if (marker.completedAt != null && task.terminalAt != null && marker.completedAt >= task.terminalAt)
       return true;
     return false;
   }
@@ -3609,12 +3644,12 @@ async function recordAssistantMessage(sessionID, message, options, evaluateConti
   if (!message)
     return { goal: null, progressed: false };
   const before = await getGoal(sessionID);
-  const id2 = messageID(message) ?? "";
-  const text2 = textFromMessage(message);
-  const progressed = Boolean(/[\p{L}\p{N}]/u.test(text2) && (id2 !== (before?.lastAssistantMessageID ?? "") || text2 !== (before?.lastAssistantText ?? "")));
+  const id = messageID(message) ?? "";
+  const text = textFromMessage(message);
+  const progressed = Boolean(/[\p{L}\p{N}]/u.test(text) && (id !== (before?.lastAssistantMessageID ?? "") || text !== (before?.lastAssistantText ?? "")));
   const goal = await recordAssistantProgress(sessionID, {
-    messageID: id2,
-    text: text2,
+    messageID: id,
+    text,
     outputTokens: outputTokensFromMessage(message) ?? null,
     noProgressTokenThreshold: positiveIntegerOrNull2(options.no_progress_token_threshold),
     maxNoProgressTurns: positiveIntegerOrNull2(options.max_no_progress_turns),
@@ -3692,18 +3727,18 @@ async function planFromTool(args, context) {
 function summarizeGoal(goal) {
   if (!goal)
     return null;
-  const phase2 = goal.plan?.phases.find((item) => item.id === goal.planProgress?.currentPhaseID);
-  const currentTask = phase2?.tasks.find((item) => item.id === goal.planProgress?.currentTaskID);
-  const nextTask = phase2?.tasks.find((item) => item.id === goal.planProgress?.nextTaskID);
-  const blockedTasks = phase2?.tasks.filter((item) => item.status === "blocked") ?? [];
-  const taskSummary = (task2) => task2 ? { id: task2.id, description: task2.description, status: task2.status, blocker: task2.blocker ?? null } : null;
+  const phase = goal.plan?.phases.find((item) => item.id === goal.planProgress?.currentPhaseID);
+  const currentTask = phase?.tasks.find((item) => item.id === goal.planProgress?.currentTaskID);
+  const nextTask = phase?.tasks.find((item) => item.id === goal.planProgress?.nextTaskID);
+  const blockedTasks = phase?.tasks.filter((item) => item.status === "blocked") ?? [];
+  const taskSummary = (task) => task ? { id: task.id, description: task.description, status: task.status, blocker: task.blocker ?? null } : null;
   return {
     id: goal.id,
     objective: goal.objective,
     status: goal.status,
     planRevision: goal.planRevision,
     planProgress: goal.planProgress,
-    currentPhase: phase2 ? { id: phase2.id, objective: phase2.objective, status: phase2.status, blocker: phase2.blocker ?? null } : null,
+    currentPhase: phase ? { id: phase.id, objective: phase.objective, status: phase.status, blocker: phase.blocker ?? null } : null,
     currentTask: taskSummary(currentTask),
     nextTask: taskSummary(nextTask),
     blockedTasks: blockedTasks.slice(0, 3).map(taskSummary),
@@ -3862,21 +3897,21 @@ async function updateGoalObjectiveFromTool(input, context, services) {
   const edit = services.consumeObjectiveEdit?.(context.sessionID, input.objective);
   const objective = validateObjective(edit?.objective ?? input.objective, services.maxObjectiveChars);
   const effectiveStatus = planningOnly ? "paused" : requested;
-  const mutate2 = () => updateGoalObjective(context.sessionID, objective, effectiveStatus, {
+  const mutate = () => updateGoalObjective(context.sessionID, objective, effectiveStatus, {
     agent: typeof context.agent === "string" ? context.agent : null,
     planModePause: planningOnly,
     maxObjectiveChars: services.maxObjectiveChars,
     requestedPlanEdit: edit
   });
-  const goal = effectiveStatus === "paused" ? await services.decidePause(context.sessionID, mutate2) : await mutate2();
+  const goal = effectiveStatus === "paused" ? await services.decidePause(context.sessionID, mutate) : await mutate();
   return JSON.stringify(planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal }, null, 2);
 }
 async function closeGoalFromTool(input, context, services) {
   if (input.status === "complete") {
-    const goal2 = await completeGoal(context.sessionID, input.evidence ?? "", services.maxObjectiveChars);
-    const budget = goal2.tokenBudget == null ? "" : ` ${services.messages.reports.tokenUsage}: ${goal2.tokensUsed}/${goal2.tokenBudget}.`;
-    const report2 = `${services.messages.reports.achieved} ${services.messages.reports.timeUsed}: ` + `${goal2.timeUsedSeconds} ${services.messages.reports.seconds}.${budget} ` + `${services.messages.reports.evidence}: ${goal2.completionEvidence}.`;
-    return JSON.stringify({ goal: goal2, completion_report: report2 }, null, 2);
+    const goal = await completeGoal(context.sessionID, input.evidence ?? "", services.maxObjectiveChars);
+    const budget = goal.tokenBudget == null ? "" : ` ${services.messages.reports.tokenUsage}: ${goal.tokensUsed}/${goal.tokenBudget}.`;
+    const report = `${services.messages.reports.achieved} ${services.messages.reports.timeUsed}: ` + `${goal.timeUsedSeconds} ${services.messages.reports.seconds}.${budget} ` + `${services.messages.reports.evidence}: ${goal.completionEvidence}.`;
+    return JSON.stringify({ goal, completion_report: report }, null, 2);
   }
   const goal = await markGoalUnmet(context.sessionID, input.blocker ?? "", services.maxObjectiveChars);
   const report = `${services.messages.reports.unmet} ${services.messages.reports.timeUsed}: ` + `${goal.timeUsedSeconds} ${services.messages.reports.seconds}. ` + `${services.messages.reports.blocker}: ${goal.blocker}.`;
@@ -3893,13 +3928,13 @@ async function updateGoalStatusFromTool(input, context, services) {
   if (input.blocker && input.reason !== "awaiting_user") {
     throw new Error("blocker is only valid for an awaiting_user pause");
   }
-  const mutate2 = () => setGoalStatus(context.sessionID, input.status, typeof context.agent === "string" ? context.agent : null, {
+  const mutate = () => setGoalStatus(context.sessionID, input.status, typeof context.agent === "string" ? context.agent : null, {
     resetAutoTurnLimit: explicitResume,
     allowInterruptedResume: explicitResume,
     requireAwaitingUserResume: !explicitResume,
     awaitingUserBlocker: input.reason === "awaiting_user" ? input.blocker : undefined
   });
-  const goal = input.status === "paused" ? await services.decidePause(context.sessionID, mutate2) : await mutate2();
+  const goal = input.status === "paused" ? await services.decidePause(context.sessionID, mutate) : await mutate();
   return JSON.stringify({ goal }, null, 2);
 }
 function v2ObjectSchema(properties, required = []) {
@@ -3931,9 +3966,9 @@ function textFromToolResult(result) {
   if (typeof result.content === "string")
     return result.content;
   if (Array.isArray(result.content)) {
-    const text2 = result.content.map(textFromPart).filter(Boolean).join(`
+    const text = result.content.map(textFromPart).filter(Boolean).join(`
 `).trim();
-    return text2 || undefined;
+    return text || undefined;
   }
   return;
 }
@@ -3986,7 +4021,7 @@ var server = async ({ client }, options) => {
     isPlanAgent,
     maxObjectiveChars: objectiveChars,
     consumeExplicitResume: (sessionID) => explicitResumeRequests.delete(sessionID),
-    decidePause: (sessionID, mutate2) => continuationEpochs.decidePause(sessionID, mutate2, () => goalServices.stopAutonomy(sessionID)),
+    decidePause: (sessionID, mutate) => continuationEpochs.decidePause(sessionID, mutate, () => goalServices.stopAutonomy(sessionID)),
     consumeObjectiveEdit: (sessionID, objective) => {
       const edit = objectiveEdits.get(sessionID);
       if (!edit || edit.objective !== objective.trim() && escapeXmlText2(edit.objective) !== objective.trim())
@@ -4109,7 +4144,7 @@ var server = async ({ client }, options) => {
       }
     } catch (error) {
       try {
-        if (claimedContinuation && isCurrent() && isTransportError(error)) {
+        if (claimedContinuation && isCurrent() && (isTransportError(error) || isRateLimitError(error) || isOverflowError(error))) {
           await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID });
         }
         await client.app?.log?.({
@@ -4196,10 +4231,10 @@ var server = async ({ client }, options) => {
       const statuses = isRecord(result.data) ? result.data : ("data" in result) || ("response" in result) ? null : result;
       if (!statuses)
         return true;
-      const status2 = statuses[sessionID];
-      if (isRecord(status2) && (status2.type === "busy" || status2.type === "retry"))
+      const status = statuses[sessionID];
+      if (isRecord(status) && (status.type === "busy" || status.type === "retry"))
         return true;
-      if ((status2 == null || isRecord(status2) && status2.type === "idle") && (busyRevisions.get(sessionID) ?? 0) === busyRevision) {
+      if ((status == null || isRecord(status) && status.type === "idle") && (busyRevisions.get(sessionID) ?? 0) === busyRevision) {
         busySessions.delete(sessionID);
       }
     } catch {
@@ -4374,13 +4409,13 @@ var server = async ({ client }, options) => {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         return;
       }
-      if (isTransportError(error)) {
+      if (isTransportError(error) || isRateLimitError(error) || isOverflowError(error)) {
         const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID
         });
         if (autoContinue && afterFailure?.status === "active") {
-          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attemptReservedAt), true, "retry");
+          scheduleSettledContinuation(sessionID, pressuredRetryDelayMs(error, minInterval, attemptReservedAt, afterFailure?.continuationFailures ?? 1), true, "retry");
         }
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
@@ -4552,9 +4587,9 @@ var server = async ({ client }, options) => {
         const sanitized = escapeGoalCommandArguments(output, goalCommandTemplate(commandName, locale), input.arguments);
         objectiveEdits.delete(input.sessionID);
         const edit = /^edit\s+([\s\S]+)$/i.exec(input.arguments.trim());
-        const goal2 = edit && sanitized ? await getGoal(input.sessionID) : null;
-        if (goal2 && edit)
-          objectiveEdits.set(input.sessionID, { goalID: goal2.id, objective: edit[1].trim() });
+        const goal = edit && sanitized ? await getGoal(input.sessionID) : null;
+        if (goal && edit)
+          objectiveEdits.set(input.sessionID, { goalID: goal.id, objective: edit[1].trim() });
         if (sanitized && input.arguments.trim().toLowerCase() === "resume") {
           explicitResumeRequests.add(input.sessionID);
         }
@@ -4594,12 +4629,12 @@ var server = async ({ client }, options) => {
       const toolResult = output;
       if (toolOutputFailed(toolResult))
         return;
-      const text2 = typeof toolResult.output === "string" ? toolResult.output : undefined;
+      const text = typeof toolResult.output === "string" ? toolResult.output : undefined;
       const before = await getGoalInternal(sessionID);
       if (!before || before.status !== "active" || !before.awaitingContinuationProgress && before.continuationFailures === 0 && before.pendingAttempt == null && scheduledContinuations.get(sessionID)?.purpose !== "recovery")
         return;
       const resolvingFailure = Boolean(before && (before.continuationFailures > 0 || before.pendingAttempt != null)) || scheduledContinuations.get(sessionID)?.purpose === "recovery";
-      const progressed = await recordToolProgress(sessionID, text2, expectedAttemptID, !NON_SUBSTANTIVE_TOOLS.has(input.tool.toLowerCase()));
+      const progressed = await recordToolProgress(sessionID, text, expectedAttemptID, !NON_SUBSTANTIVE_TOOLS.has(input.tool.toLowerCase()));
       if (resolvingFailure && progressed?.continuationFailures === 0 && progressed.pendingAttempt == null) {
         locallyDeliveredPendingSessions.delete(sessionID);
         cancelScheduledContinuation(sessionID);
@@ -4665,9 +4700,9 @@ var server = async ({ client }, options) => {
         taskTracker.observeSessionCreated(event);
       }
       if (sessionID && eventType === "session.status") {
-        const status2 = event.properties?.status;
-        if (isRecord(status2) && typeof status2.type === "string") {
-          if (status2.type === "busy") {
+        const status = event.properties?.status;
+        if (isRecord(status) && typeof status.type === "string") {
+          if (status.type === "busy") {
             const epoch = continuationEpochs.current(sessionID);
             const revision = (busyRevisions.get(sessionID) ?? 0) + 1;
             busySessions.add(sessionID);
@@ -4678,19 +4713,19 @@ var server = async ({ client }, options) => {
               armTurnWatchdog(sessionID);
             }
           }
-          if (status2.type === "idle") {
+          if (status.type === "idle") {
             explicitResumeRequests.delete(sessionID);
             busySessions.delete(sessionID);
             nativeRetrySessions.delete(sessionID);
             clearTurnWatchdog(sessionID);
             watchdogRescuedSessions.delete(sessionID);
           }
-          if (status2.type === "retry") {
+          if (status.type === "retry") {
             nativeRetrySessions.add(sessionID);
             clearTurnWatchdog(sessionID);
             cancelScheduledContinuation(sessionID);
           }
-          taskTracker.observeSessionStatus(sessionID, status2.type);
+          taskTracker.observeSessionStatus(sessionID, status.type);
         }
       }
       if (sessionID && eventType === "session.idle") {
@@ -4712,7 +4747,7 @@ var server = async ({ client }, options) => {
         watchdogRescuedSessions.delete(sessionID);
         const props = event.properties ?? {};
         const errorMessage = transportErrorMessageFromEvent(props);
-        if (errorMessage && isTransportError(errorMessage)) {
+        if (errorMessage && (isTransportError(errorMessage) || isRateLimitError(errorMessage) || isOverflowError(errorMessage))) {
           const goal = await getGoalInternal(sessionID);
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal);
@@ -4725,7 +4760,7 @@ var server = async ({ client }, options) => {
               if (afterFailure)
                 locallyDeliveredPendingSessions.delete(sessionID);
               if (autoContinue && afterFailure?.status === "active") {
-                scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt), true, "retry");
+                scheduleSettledContinuation(sessionID, pressuredRetryDelayMs(errorMessage, minInterval, attempt.reservedAt, goal.continuationFailures + 1), true, "retry");
               }
             } else if (autoContinue) {
               scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, goal), false, "recovery");
@@ -4822,7 +4857,7 @@ async function setupV2(context) {
       }
       await deferGoalUntilShell(sessionID, shellID);
     },
-    decidePause: (sessionID, mutate2) => continuationEpochs.decidePause(sessionID, mutate2, () => goalServices.stopAutonomy(sessionID)),
+    decidePause: (sessionID, mutate) => continuationEpochs.decidePause(sessionID, mutate, () => goalServices.stopAutonomy(sessionID)),
     consumeExplicitResume: (sessionID) => explicitResumeRequests.delete(sessionID),
     consumeObjectiveEdit: (sessionID, objective) => {
       const edit = objectiveEdits.get(sessionID);
@@ -4872,10 +4907,10 @@ async function setupV2(context) {
   }
   let disposed = false;
   let eventConsumerStopped = false;
-  function stepKey(sessionID, messageID2) {
-    return `${sessionID}\x00${messageID2}`;
+  function stepKey(sessionID, messageID) {
+    return `${sessionID}\x00${messageID}`;
   }
-  async function sendContinuation2(sessionID, prompt, agent) {
+  async function sendContinuation(sessionID, prompt, agent) {
     markSessionOwnership(sessionID, true);
     await context.session.prompt({
       sessionID,
@@ -4941,7 +4976,7 @@ async function setupV2(context) {
         claimedContinuation = true;
         claimedGoalID = current.id;
         watchdogRescuedSessions.add(sessionID);
-        await sendContinuation2(sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestStep?.agent ?? null);
+        await sendContinuation(sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestStep?.agent ?? null);
         break;
       }
       if (!isCurrent())
@@ -4957,7 +4992,7 @@ async function setupV2(context) {
       }
     } catch (error) {
       try {
-        if (claimedContinuation && isCurrent() && isTransportError(error)) {
+        if (claimedContinuation && isCurrent() && (isTransportError(error) || isRateLimitError(error) || isOverflowError(error))) {
           await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID });
         }
         v2ErrorLog("Turn watchdog retry failed", error);
@@ -5197,25 +5232,25 @@ async function setupV2(context) {
         if (continuationEpochs.hasPending(sessionID))
           continue;
         const deliveryAgent = latestStepBySession.get(sessionID)?.agent;
-        const taskStatus2 = taskBlockStatus(sessionID);
+        const taskStatus = taskBlockStatus(sessionID);
         const planRestricted = isPlanAgent(beforeDelivery?.lastPromptAgent) || isPlanAgent(deliveryAgent);
         const ownsSchedule = !scheduled || scheduledContinuations.get(sessionID) === scheduled;
         const reserved = continuationStillReserved(goal, beforeDelivery);
-        if (!beforeDelivery || !reserved || !ownsSchedule || stoppedExecutions.has(sessionID) || busySessions.has(sessionID) || nativeRetrySessions.has(sessionID) || planRestricted || taskStatus2 && taskStatus2.blocked || beforeDelivery.shellDeferrals.some((item) => !item.delivered)) {
+        if (!beforeDelivery || !reserved || !ownsSchedule || stoppedExecutions.has(sessionID) || busySessions.has(sessionID) || nativeRetrySessions.has(sessionID) || planRestricted || taskStatus && taskStatus.blocked || beforeDelivery.shellDeferrals.some((item) => !item.delivered)) {
           await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
           if (isCurrent() && reserved && ownsSchedule && !stoppedExecutions.has(sessionID) && !nativeRetrySessions.has(sessionID)) {
             if (planRestricted)
               await pauseGoalForPlanMode(sessionID);
             else if (busySessions.has(sessionID))
               await rearmBusyContinuation(sessionID, scheduled);
-            else if (taskStatus2 && taskStatus2.blocked) {
+            else if (taskStatus && taskStatus.blocked) {
               taskDeferredSessions.add(sessionID);
-              scheduleSettledContinuation(sessionID, taskStatus2.retryAt != null ? taskStatus2.retryAt - Date.now() : TASK_BLOCK_RETRY_MS, scheduled != null);
+              scheduleSettledContinuation(sessionID, taskStatus.retryAt != null ? taskStatus.retryAt - Date.now() : TASK_BLOCK_RETRY_MS, scheduled != null);
             }
           }
           return;
         }
-        await sendContinuation2(sessionID, beforeDelivery.status === "active" ? continuationPrompt(beforeDelivery, locale) : limitPrompt(beforeDelivery, locale), beforeDelivery.lastPromptAgent ?? deliveryAgent ?? null);
+        await sendContinuation(sessionID, beforeDelivery.status === "active" ? continuationPrompt(beforeDelivery, locale) : limitPrompt(beforeDelivery, locale), beforeDelivery.lastPromptAgent ?? deliveryAgent ?? null);
         break;
       }
       if (!isCurrent()) {
@@ -5237,13 +5272,13 @@ async function setupV2(context) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         return;
       }
-      if (isTransportError(error)) {
+      if (isTransportError(error) || isRateLimitError(error) || isOverflowError(error)) {
         const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID
         });
         if (autoContinue && afterFailure?.status === "active") {
-          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attemptReservedAt), true, "retry");
+          scheduleSettledContinuation(sessionID, pressuredRetryDelayMs(error, minInterval, attemptReservedAt, afterFailure?.continuationFailures ?? 1), true, "retry");
         }
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
@@ -5379,9 +5414,9 @@ async function setupV2(context) {
       case "session.execution.started":
       case "session.retry.scheduled":
       case "session.status": {
-        const status2 = event.type === "session.execution.started" ? { type: "busy" } : event.type === "session.retry.scheduled" ? { type: "retry" } : data.status;
-        if (sessionID && isRecord(status2) && typeof status2.type === "string") {
-          if (status2.type === "busy") {
+        const status = event.type === "session.execution.started" ? { type: "busy" } : event.type === "session.retry.scheduled" ? { type: "retry" } : data.status;
+        if (sessionID && isRecord(status) && typeof status.type === "string") {
+          if (status.type === "busy") {
             const epoch = continuationEpochs.current(sessionID);
             const revision = (busyRevisions.get(sessionID) ?? 0) + 1;
             stoppedExecutions.delete(sessionID);
@@ -5393,20 +5428,20 @@ async function setupV2(context) {
               armTurnWatchdog(sessionID);
             }
           }
-          if (status2.type === "idle") {
+          if (status.type === "idle") {
             explicitResumeRequests.delete(sessionID);
             busySessions.delete(sessionID);
             nativeRetrySessions.delete(sessionID);
             clearTurnWatchdog(sessionID);
             watchdogRescuedSessions.delete(sessionID);
           }
-          if (status2.type === "retry") {
+          if (status.type === "retry") {
             nativeRetrySessions.add(sessionID);
             clearTurnWatchdog(sessionID);
             cancelScheduledContinuation(sessionID);
           }
-          taskTracker.observeSessionStatus(sessionID, status2.type);
-          if (status2.type === "idle") {
+          taskTracker.observeSessionStatus(sessionID, status.type);
+          if (status.type === "idle") {
             const goal = await getGoalInternal(sessionID);
             if (autoContinue || goal?.pendingAttempt != null)
               await runAutoContinue(sessionID);
@@ -5463,14 +5498,14 @@ async function setupV2(context) {
         clearTurnWatchdog(sessionID);
         watchdogRescuedSessions.delete(sessionID);
         const errorMessage = transportErrorMessageFromEvent(data);
-        if (!isTransportError(errorMessage)) {
+        if (!isTransportError(errorMessage) && !isRateLimitError(errorMessage) && !isOverflowError(errorMessage)) {
           stoppedExecutions.add(sessionID);
           cancelScheduledContinuation(sessionID);
           taskDeferredSessions.delete(sessionID);
         }
         taskTracker.observeSessionStatus(sessionID, "idle");
         await releaseDeliveredShellDeferrals(sessionID);
-        if (errorMessage && isTransportError(errorMessage)) {
+        if (errorMessage && (isTransportError(errorMessage) || isRateLimitError(errorMessage) || isOverflowError(errorMessage))) {
           const goal = await getGoalInternal(sessionID);
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal);
@@ -5483,7 +5518,7 @@ async function setupV2(context) {
               if (afterFailure)
                 locallyDeliveredPendingSessions.delete(sessionID);
               if (autoContinue && afterFailure?.status === "active") {
-                scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt), true, "retry");
+                scheduleSettledContinuation(sessionID, pressuredRetryDelayMs(errorMessage, minInterval, attempt.reservedAt, goal.continuationFailures + 1), true, "retry");
               }
             } else if (autoContinue) {
               scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, goal), false, "recovery");
@@ -5532,16 +5567,16 @@ async function setupV2(context) {
           return;
         if (scheduledContinuations.get(sessionID)?.purpose === "recovery")
           cancelScheduledContinuation(sessionID);
-        const messageID2 = data.assistantMessageID;
+        const messageID = data.assistantMessageID;
         const agent = typeof data.agent === "string" ? data.agent : undefined;
         if (agent)
           await recordPromptAgent(sessionID, agent);
         taskTracker.observeAssistantMessage(sessionID, {
-          info: { id: messageID2, role: "assistant", time: { completed: event.created } }
+          info: { id: messageID, role: "assistant", time: { completed: event.created } }
         });
-        if (!stepTextBuffers.has(stepKey(sessionID, messageID2)))
-          stepTextBuffers.set(stepKey(sessionID, messageID2), "");
-        latestStepBySession.set(sessionID, { messageID: messageID2, agent, text: "", outputTokens: null, completedAt: event.created });
+        if (!stepTextBuffers.has(stepKey(sessionID, messageID)))
+          stepTextBuffers.set(stepKey(sessionID, messageID), "");
+        latestStepBySession.set(sessionID, { messageID, agent, text: "", outputTokens: null, completedAt: event.created });
         return;
       }
       case "session.text.delta": {
@@ -5560,9 +5595,9 @@ async function setupV2(context) {
       case "session.step.ended": {
         if (!sessionID || typeof data.assistantMessageID !== "string")
           return;
-        const messageID2 = data.assistantMessageID;
-        const text2 = stepTextBuffers.get(stepKey(sessionID, messageID2)) ?? "";
-        if (/[\p{L}\p{N}]/u.test(text2)) {
+        const messageID = data.assistantMessageID;
+        const text = stepTextBuffers.get(stepKey(sessionID, messageID)) ?? "";
+        if (/[\p{L}\p{N}]/u.test(text)) {
           const scheduled = scheduledContinuations.get(sessionID);
           if (scheduled?.purpose === "recovery")
             cancelScheduledContinuation(sessionID);
@@ -5577,11 +5612,11 @@ async function setupV2(context) {
             initialBaseline: Math.ceil(sum - tokens)
           });
         }
-        stepTextBuffers.delete(stepKey(sessionID, messageID2));
+        stepTextBuffers.delete(stepKey(sessionID, messageID));
         const outputTokens = outputTokensFromRecord(data.tokens) ?? null;
         const afterStep = await recordAssistantProgress(sessionID, {
-          messageID: messageID2,
-          text: text2,
+          messageID,
+          text,
           outputTokens,
           noProgressTokenThreshold: positiveIntegerOrNull2(options.no_progress_token_threshold),
           maxNoProgressTurns: positiveIntegerOrNull2(options.max_no_progress_turns),
@@ -5589,9 +5624,9 @@ async function setupV2(context) {
         });
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, afterStep);
         latestStepBySession.set(sessionID, {
-          messageID: messageID2,
+          messageID,
           agent: latestStepBySession.get(sessionID)?.agent,
-          text: text2,
+          text,
           outputTokens,
           completedAt: event.created
         });
@@ -5600,9 +5635,9 @@ async function setupV2(context) {
       case "session.step.failed": {
         if (!sessionID || typeof data.assistantMessageID !== "string")
           return;
-        const messageID2 = data.assistantMessageID;
-        const text2 = stepTextBuffers.get(stepKey(sessionID, messageID2)) ?? "";
-        if (/[\p{L}\p{N}]/u.test(text2)) {
+        const messageID = data.assistantMessageID;
+        const text = stepTextBuffers.get(stepKey(sessionID, messageID)) ?? "";
+        if (/[\p{L}\p{N}]/u.test(text)) {
           const scheduled = scheduledContinuations.get(sessionID);
           if (scheduled?.purpose === "recovery")
             cancelScheduledContinuation(sessionID);
@@ -5617,11 +5652,11 @@ async function setupV2(context) {
             initialBaseline: Math.ceil(sum - tokens)
           });
         }
-        stepTextBuffers.delete(stepKey(sessionID, messageID2));
+        stepTextBuffers.delete(stepKey(sessionID, messageID));
         const outputTokens = outputTokensFromRecord(data.tokens) ?? null;
         const afterStep = await recordAssistantProgress(sessionID, {
-          messageID: messageID2,
-          text: text2,
+          messageID,
+          text,
           outputTokens,
           noProgressTokenThreshold: positiveIntegerOrNull2(options.no_progress_token_threshold),
           maxNoProgressTurns: positiveIntegerOrNull2(options.max_no_progress_turns),
@@ -5629,9 +5664,9 @@ async function setupV2(context) {
         });
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, afterStep);
         latestStepBySession.set(sessionID, {
-          messageID: messageID2,
+          messageID,
           agent: latestStepBySession.get(sessionID)?.agent,
-          text: text2,
+          text,
           outputTokens,
           completedAt: event.created
         });
@@ -5725,7 +5760,7 @@ async function setupV2(context) {
                   pursuedGoalID ??= goal.id;
                   if (goal.id !== pursuedGoalID)
                     break;
-                  await new Promise((resolve2) => setTimeout(resolve2, 250));
+                  await new Promise((resolve) => setTimeout(resolve, 250));
                 } while (!disposed && !signal.aborted);
               }
             } catch (error) {
@@ -5826,7 +5861,7 @@ async function setupV2(context) {
       if (goal || input.tool === "clear_goal")
         input.result = { ...input.result, metadata: { ...input.result.metadata, ...acpPlanMetadata(goal) } };
     }
-    const text2 = textFromToolResult(input.result);
+    const text = textFromToolResult(input.result);
     taskTracker.noteTaskOutput({ tool: input.tool, sessionID: input.sessionID, callID: input.id }, { output: textFromToolResult(input.result) });
     if (!tracksToolStarts || !sessionID || typeof input.tool !== "string")
       return;
@@ -5834,14 +5869,14 @@ async function setupV2(context) {
       return;
     if (toolOutputFailed(input.result))
       return;
-    const recovering = Boolean(text2?.trim()) && expectedAttemptID == null && !activeContinuationsV2.has(sessionID) && scheduledContinuations.get(sessionID)?.purpose === "recovery";
+    const recovering = Boolean(text?.trim()) && expectedAttemptID == null && !activeContinuationsV2.has(sessionID) && scheduledContinuations.get(sessionID)?.purpose === "recovery";
     if (recovering)
       cancelScheduledContinuation(sessionID);
     const before = await getGoalInternal(sessionID);
     if (!before || before.status !== "active" || !before.awaitingContinuationProgress && before.continuationFailures === 0 && before.pendingAttempt == null && scheduledContinuations.get(sessionID)?.purpose !== "recovery" && !recovering)
       return;
     const resolvingFailure = Boolean(before && (before.continuationFailures > 0 || before.pendingAttempt != null)) || recovering || scheduledContinuations.get(sessionID)?.purpose === "recovery";
-    const progressed = await recordToolProgress(sessionID, text2, expectedAttemptID, !NON_SUBSTANTIVE_TOOLS.has(input.tool.toLowerCase()));
+    const progressed = await recordToolProgress(sessionID, text, expectedAttemptID, !NON_SUBSTANTIVE_TOOLS.has(input.tool.toLowerCase()));
     if (resolvingFailure && progressed?.continuationFailures === 0 && progressed.pendingAttempt == null) {
       locallyDeliveredPendingSessions.delete(sessionID);
       cancelScheduledContinuation(sessionID);
@@ -5950,7 +5985,7 @@ async function setupV2(context) {
       }
     }
     const termination = Promise.allSettled([consumer, eventIterator?.return?.()]);
-    await Promise.race([termination, new Promise((resolve2) => setTimeout(resolve2, 2000))]);
+    await Promise.race([termination, new Promise((resolve) => setTimeout(resolve, 2000))]);
   };
 }
 function goalToolsV2(services) {

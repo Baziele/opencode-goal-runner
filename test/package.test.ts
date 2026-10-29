@@ -36,7 +36,7 @@ test("the packed plugin resolves its entrypoints and mutates state under Bun and
     await new Bun.Archive(await Bun.file(join(root, tarball)).arrayBuffer()).extract(join(root, "unpacked"))
     const scope = join(root, "node_modules", "@baziele")
     await mkdir(scope, { recursive: true })
-    await rename(join(root, "unpacked", "package"), join(scope, "opencode-goal-plugin"))
+    await rename(join(root, "unpacked", "package"), join(scope, "opencode-goal-runner"))
     const name = "@baziele/opencode-goal-runner"
     const entrypoints = { "": "dist/server.js", "/server": "dist/server.js", "/tui": "src/tui.ts" }
     for (const [suffix, target] of Object.entries(entrypoints)) {

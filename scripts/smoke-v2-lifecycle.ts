@@ -159,10 +159,10 @@ try {
   }
   await writeFile(join(root, "config.json"), JSON.stringify(await api(`/api/config?location%5Bdirectory%5D=${encodeURIComponent(project)}`)))
   const commands = await api(`/api/command?location%5Bdirectory%5D=${encodeURIComponent(project)}`) as { data: Array<{ name: string }> }
-  assert(commands.data.some((command) => command.name === "goal"))
+  assert(commands.data.some((command) => command.name === "customgoal"))
   // Stable V2 reads `name`; 0.0.0 beta hosts still read `command`.
   await api(`/api/session/${sessionID}/command`, {
-    [commandField]: "goal",
+    [commandField]: "customgoal",
     text: "Create a goal for the fixture milestone. Keep it active until the automatic continuation arrives.",
   })
   let state: { goals: Record<string, { status: string; autoTurns: number }> } | undefined
@@ -205,7 +205,7 @@ try {
     agent: "build",
   }) as { data: { id: string } }
   await api(`/api/session/${arraysSession.data.id}/command`, {
-    [commandField]: "goal",
+    [commandField]: "customgoal",
     text: "Create a goal for the arrays-present command smoke.",
     files: [],
     agents: [],

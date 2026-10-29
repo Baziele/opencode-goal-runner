@@ -713,7 +713,7 @@ test("V2 /goal waits across execution cycles and resolves when the overall goal 
   await createGoalViaV2Tool(mock, "finish the entire goal")
   let returned = false
   const command = mock.commands
-    .find((command) => command.name === "goal")!
+    .find((command) => command.name === "customgoal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "finish the entire goal" }, delivery: "steer" })
     .then(() => {
       returned = true
@@ -742,7 +742,7 @@ test("V2 cancellation releases a waiting goal command without restarting the goa
   await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "respect Cancel during a long-running command")
   const command = mock.commands
-    .find((command) => command.name === "goal")!
+    .find((command) => command.name === "customgoal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "respect Cancel" }, delivery: "steer" })
   await waitFor(() => finish !== undefined)
   await mock.stream.push({
@@ -773,7 +773,7 @@ test("V2 disposal aborts a pending command wait", async () => {
   const cleanup = await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "stop when the plugin is disposed")
   const command = mock.commands
-    .find((command) => command.name === "goal")!
+    .find((command) => command.name === "customgoal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "Verify cleanup on disposal" }, delivery: "steer" })
   await waitFor(() => waiting)
   await cleanup()
@@ -797,7 +797,7 @@ test("V2 command wait ends if the pursued goal is replaced", async () => {
   await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "Original goal")
   await mock.commands
-    .find((command) => command.name === "goal")!
+    .find((command) => command.name === "customgoal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "Original goal" }, delivery: "steer" })
   expect(waits).toBe(2)
   expect((await getGoal("ses_v2"))?.objective).toBe("A separate goal")
@@ -822,7 +822,7 @@ test("V2 control commands and disabled auto-continuation return after their exec
     await setupPlugin(context as never)
     await createGoalViaV2Tool(mock, "Original goal")
     await mock.commands
-      .find((command) => command.name === "goal")!
+      .find((command) => command.name === "customgoal")!
       .execute({ sessionID: "ses_v2", prompt: { text }, delivery: "steer" })
     expect(waits).toBe(text === "history" ? 0 : 1)
   }
@@ -1055,10 +1055,10 @@ test("V2 setup registers /goal, /pause_goal, and /resume_goal via command transf
   const mock = makeMockContext({ auto_continue: false })
   const cleanup = await setupPlugin(mock as never)
 
-  const command = mock.commands.find((candidate) => candidate.name === "goal")
+  const command = mock.commands.find((candidate) => candidate.name === "customgoal")
   const pause = mock.commands.find((candidate) => candidate.name === "pause_goal")
   const resume = mock.commands.find((candidate) => candidate.name === "resume_goal")
-  expect(mock.commands.map((candidate) => candidate.name).sort()).toEqual(["goal", "pause_goal", "resume_goal"])
+  expect(mock.commands.map((candidate) => candidate.name).sort()).toEqual(["customgoal", "pause_goal", "resume_goal"])
   expect(command).toBeDefined()
   expect(command?.description).toBe("Set or view the long-running session goal")
 
@@ -1080,7 +1080,7 @@ test("V2 setup registers /goal, /pause_goal, and /resume_goal via command transf
   expect(mock.promptCalls[0]?.files).toEqual([{ uri: "file:///tmp/context.txt" }])
   expect(mock.promptCalls[0]?.agents).toEqual([{ name: "build" }])
   expect(mock.promptCalls[0]?.skills).toEqual([{ id: "review" }])
-  expect(mock.promptCalls[0]?.text).toContain('OpenCode goal mode command "/goal" was invoked')
+  expect(mock.promptCalls[0]?.text).toContain('OpenCode goal mode command "/customgoal" was invoked')
   expect(mock.promptCalls[0]?.text).toContain("ship $&amp; and $ARGUMENTS")
   expect(mock.promptCalls[0]?.text).toContain("call get_goal first")
   expect(mock.promptCalls[0]?.text).toContain("never call it again")
@@ -1131,7 +1131,7 @@ test("V2 only renews the auto-turn window after an explicit resume command", asy
   await reserveContinuation("ses_resume_limit", 25, 0)
 
   const statusTool = goalTool(mock, "update_goal_status")
-  await expect(statusTool.execute({ status: "active" }, toolContext("ses_resume_limit"))).rejects.toThrow("explicit /goal resume")
+  await expect(statusTool.execute({ status: "active" }, toolContext("ses_resume_limit"))).rejects.toThrow("explicit /customgoal resume")
   expect((await getGoal("ses_resume_limit"))?.autoTurns).toBe(1)
   await reserveContinuation("ses_resume_limit", 25, 0)
   expect((await getGoal("ses_resume_limit"))?.status).toBe("usageLimited")
@@ -1171,7 +1171,7 @@ test("V2 refuses model-only resume of an ordinary pause", async () => {
   const statusTool = goalTool(mock, "update_goal_status")
   await statusTool.execute({ status: "paused" }, toolContext())
   await mock.hooks.prompt?.({ sessionID: "ses_v2", prompt: { text: "Unrelated question" } })
-  await expect(statusTool.execute({ status: "active" }, toolContext())).rejects.toThrow("explicit /goal resume")
+  await expect(statusTool.execute({ status: "active" }, toolContext())).rejects.toThrow("explicit /customgoal resume")
   expect((await getGoal("ses_v2"))?.status).toBe("paused")
 
   const resume = mock.commands.find((candidate) => candidate.name === "resume_goal")
@@ -1225,7 +1225,7 @@ test("V2 stop after interruption prevents a later explicit resume", async () => 
 test("V2 goal command XML-escapes delimiter breakouts while preserving objective text", async () => {
   const mock = makeMockContext({ auto_continue: false })
   const cleanup = await setupPlugin(mock as never)
-  const command = mock.commands.find((candidate) => candidate.name === "goal")
+  const command = mock.commands.find((candidate) => candidate.name === "customgoal")
 
   await command?.execute({
     sessionID: "ses_injection",
@@ -1250,7 +1250,7 @@ test("V2 setup preserves existing commands and configured command-name collision
   const mock = makeMockContext({ auto_continue: false, command_name: "pause_goal" }, ["resume_goal"])
   const cleanup = await setupPlugin(mock as never)
 
-  expect(mock.commands.map((command) => command.name)).toEqual(["goal", "pause_goal"])
+  expect(mock.commands.map((command) => command.name)).toEqual(["customgoal", "pause_goal"])
   expect(mock.commands[0]?.description).toBe("Set or view the long-running session goal")
   expect(mock.commands[1]?.description).toBe("Pause the current long-running session goal")
 
@@ -1261,7 +1261,7 @@ test("V2 setup preserves existing commands and configured command-name collision
 test("V2 goal command omits undefined prompt fields and preserves empty attachment arrays", async () => {
   const mock = makeMockContext({ auto_continue: false })
   const cleanup = await setupPlugin(mock as never)
-  const command = mock.commands.find((candidate) => candidate.name === "goal")
+  const command = mock.commands.find((candidate) => candidate.name === "customgoal")
 
   await command?.execute({
     sessionID: "ses_undefined_attachments",
@@ -1297,7 +1297,7 @@ test("V2 goal command omits undefined prompt fields and preserves empty attachme
 })
 
 test("V2 prompt hook pauses compatibility commands before admission", async () => {
-  const mock = makeMockContext({ auto_continue: false }, ["goal", "pause_goal", "resume_goal"])
+  const mock = makeMockContext({ auto_continue: false }, ["customgoal", "pause_goal", "resume_goal"])
   const cleanup = await setupPlugin(mock as never)
   await createGoalViaV2Tool(mock, "pause before acknowledgement")
   const v1 = await plugin.server({ client: { session: { promptAsync: async () => {} } } } as never, {
@@ -1360,12 +1360,12 @@ test("V2 command transform remains stable when the registry replays it", async (
     }
   }
   const cleanup = await setupPlugin(mock as never)
-  expect(mock.commands.map((command) => command.name).sort()).toEqual(["goal", "pause_goal", "resume_goal"])
+  expect(mock.commands.map((command) => command.name).sort()).toEqual(["customgoal", "pause_goal", "resume_goal"])
 
   mock.commands.length = 0
   transform?.({ add: (command) => mock.commands.push(command) })
 
-  expect(mock.commands.map((command) => command.name).sort()).toEqual(["goal", "pause_goal", "resume_goal"])
+  expect(mock.commands.map((command) => command.name).sort()).toEqual(["customgoal", "pause_goal", "resume_goal"])
   mock.stream.end()
   await cleanup()
 })
@@ -3182,7 +3182,7 @@ test("V2 command cancellation between idle cycles persists cancellation and stop
   await createGoalViaV2Tool(mock, "Goal with idle gaps")
   const controller = new AbortController()
   const command = mock.commands
-    .find((command) => command.name === "goal")!
+    .find((command) => command.name === "customgoal")!
     .execute(
       { sessionID: "ses_v2", prompt: { text: "Goal with idle gaps" }, delivery: "steer" },
       { signal: controller.signal },
@@ -3209,7 +3209,7 @@ test("V2 wait failure pauses the goal and returns without hidden autonomous cont
   await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "Wait failure")
   await mock.commands
-    .find((command) => command.name === "goal")!
+    .find((command) => command.name === "customgoal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "Wait failure" }, delivery: "steer" })
   expect((await getGoal("ses_v2"))?.status).toBe("paused")
   expect(mock.promptCalls).toHaveLength(1)
@@ -3238,13 +3238,13 @@ test("V2 planned scope edits need a matching explicit command and consume the gr
   )
   await expect(
     goalTool(mock, "update_goal_objective").execute({ objective: "Only parser" }, toolContext()),
-  ).rejects.toThrow("/goal edit")
+  ).rejects.toThrow("/customgoal edit")
   await mock.commands
-    .find((command) => command.name === "goal")!
+    .find((command) => command.name === "customgoal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "edit New user scope & <checks>" }, delivery: "steer" })
   await expect(
     goalTool(mock, "update_goal_objective").execute({ objective: "Different unrequested scope" }, toolContext()),
-  ).rejects.toThrow("/goal edit")
+  ).rejects.toThrow("/customgoal edit")
   await goalTool(mock, "update_goal_objective").execute({ objective: "New user scope &amp; &lt;checks&gt;" }, toolContext())
   expect(await getGoal("ses_v2")).toMatchObject({ objective: "New user scope & <checks>", plan: null, planRevision: 2 })
   await goalTool(mock, "update_goal_plan").execute(
@@ -3253,7 +3253,7 @@ test("V2 planned scope edits need a matching explicit command and consume the gr
   )
   await expect(
     goalTool(mock, "update_goal_objective").execute({ objective: "Original full goal" }, toolContext()),
-  ).rejects.toThrow("/goal edit")
+  ).rejects.toThrow("/customgoal edit")
 })
 
 for (const report of ["status", "show", "current"]) {
@@ -3272,7 +3272,7 @@ for (const report of ["status", "show", "current"]) {
     await setupPlugin(context as never)
     await createGoalViaV2Tool(mock, "Original full goal")
     await mock.commands
-      .find((command) => command.name === "goal")!
+      .find((command) => command.name === "customgoal")!
       .execute({ sessionID: "ses_v2", prompt: { text: report }, delivery: "steer" })
     expect(waits).toBe(0)
   })
@@ -3285,7 +3285,7 @@ test("V2 a stopped event stream pauses a waiting goal rather than polling foreve
   await createGoalViaV2Tool(mock, "Goal with event delivery")
   mock.stream.end()
   await mock.commands
-    .find((command) => command.name === "goal")!
+    .find((command) => command.name === "customgoal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "Continue the goal" }, delivery: "steer" })
   expect((await getGoal("ses_v2"))?.status).toBe("paused")
 })
@@ -3297,7 +3297,7 @@ test("V2 a command transport abort preserves the active goal for reconnection", 
   await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "Preserve scope after disconnect")
   const controller = new AbortController()
-  const command = mock.commands.find((command) => command.name === "goal")!.execute({ sessionID: "ses_v2", prompt: { text: "Preserve scope after disconnect" }, delivery: "steer" }, { signal: controller.signal })
+  const command = mock.commands.find((command) => command.name === "customgoal")!.execute({ sessionID: "ses_v2", prompt: { text: "Preserve scope after disconnect" }, delivery: "steer" }, { signal: controller.signal })
   await waitFor(() => waits > 0)
   controller.abort()
   await command
@@ -3328,7 +3328,7 @@ test("V2 a failing command list does not remove the plugin", async () => {
   expect(registered).toContain("get_goal")
   expect(registered).toContain("create_goal")
   const commands = mock.commands.map((command) => command.name)
-  expect(commands).toContain("goal")
+  expect(commands).toContain("customgoal")
 
   mock.stream.end()
   await cleanup()
@@ -3386,7 +3386,7 @@ test("V2 a subscription startup failure is reported and cleanup completes", asyn
   const cleanup = await setupPlugin(mock as never)
   expect(await readFile(join(dir, "goal-plugin.log"), "utf8")).toContain("subscription startup sentinel")
   await createGoal("ses_v2", "Leave the failed location loop safely")
-  await mock.commands.find((command) => command.name === "goal")!.execute({
+  await mock.commands.find((command) => command.name === "customgoal")!.execute({
     sessionID: "ses_v2", prompt: { text: "resume" }, delivery: "steer",
   })
   expect((await getGoal("ses_v2"))?.status).toBe("paused")
@@ -3432,7 +3432,7 @@ for (const target of ["command", "tools", "execute.before", "execute.after", "pr
       }
       const cleanup = await setupPlugin(mock as never)
       if (target !== "tools") expect(mock.tools.map((tool) => tool.name)).toContain("get_goal")
-      if (target !== "command") expect(mock.commands.map((command) => command.name)).toContain("goal")
+      if (target !== "command") expect(mock.commands.map((command) => command.name)).toContain("customgoal")
       expect(await readFile(join(dir, "goal-plugin.log"), "utf8")).toContain(`registration sentinel ${target}`)
       mock.stream.end()
       await cleanup()
@@ -3470,7 +3470,7 @@ test("V2 /goal returns after prompt admission on Desktop and hosts without a cli
     }
     const cleanup = await setupPlugin(context as never)
     await mock.commands
-      .find((command) => command.name === "goal")!
+      .find((command) => command.name === "customgoal")!
       .execute({ sessionID: "ses_v2", prompt: { text: "Run multi-minute desktop goal" }, delivery: "steer" })
     expect(mock.promptCalls).toHaveLength(1)
     expect(waits).toBe(0)
@@ -3489,7 +3489,7 @@ test("V2 Desktop goal continues after its command returns", async () => {
   const cleanup = await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "Continue after the Desktop request returns")
 
-  await mock.commands.find((command) => command.name === "goal")!.execute({
+  await mock.commands.find((command) => command.name === "customgoal")!.execute({
     sessionID: "ses_v2",
     prompt: { text: "Continue after the Desktop request returns" },
     delivery: "steer",
@@ -3519,7 +3519,7 @@ test("V2 wait_for_command overrides the client default in both directions", asyn
     }
     const cleanup = await setupPlugin(context as never)
     await createGoalViaV2Tool(mock, "Explicit command wait override")
-    await mock.commands.find((command) => command.name === "goal")!.execute({
+    await mock.commands.find((command) => command.name === "customgoal")!.execute({
       sessionID: "ses_v2",
       prompt: { text: "Explicit command wait override" },
       delivery: "steer",
@@ -3857,7 +3857,7 @@ for (const rejectedPause of ["planned_objective", "oversized_blocker"]) {
       const pause = rejectedPause === "planned_objective"
         ? goalTool(mock, "update_goal_objective").execute({ objective: "Only parser", status: "paused" }, toolContext())
         : goalTool(mock, "update_goal_status").execute({ status: "paused", reason: "awaiting_user", blocker: "x".repeat(100_001) }, toolContext())
-      await expect(pause).rejects.toThrow(rejectedPause === "planned_objective" ? "/goal edit" : "awaiting-user blocker must be at most")
+      await expect(pause).rejects.toThrow(rejectedPause === "planned_objective" ? "/customgoal edit" : "awaiting-user blocker must be at most")
       expect(await getGoal("ses_v2")).toMatchObject({ id: goal.id, objective: goal.objective, status: "active", plan: original?.plan })
       await waitFor(() => mock.promptCalls.length === 1, 1_000)
       await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
@@ -3915,7 +3915,7 @@ for (const wakeup of ["watchdog", "scheduled recovery", "disposed watchdog"]) {
       await owner
       const error = await rejected
       expect(error).toBeInstanceOf(Error)
-      expect((error as Error).message).toContain("/goal edit")
+      expect((error as Error).message).toContain("/customgoal edit")
       expect(await getGoal("ses_v2")).toMatchObject({ id: goal.id, objective: goal.objective, status: "active", planRevision: 1 })
       if (wakeup === "disposed watchdog") {
         await Bun.sleep(150)

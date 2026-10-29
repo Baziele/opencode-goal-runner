@@ -1170,7 +1170,7 @@ export async function updateGoalObjective(
     accountWallClock(goal)
     if (goal.objective !== value) {
       if (goal.plan && (options?.requestedPlanEdit?.goalID !== goal.id || options.requestedPlanEdit.objective !== value)) {
-        throw new Error("editing a planned goal requires an explicit /goal edit <objective> command")
+        throw new Error("editing a planned goal requires an explicit /customgoal edit <objective> command")
       }
       goal.plan = null
       goal.planRevision += 1
@@ -1249,7 +1249,7 @@ export async function setGoalStatus(
     if (status === "active" && options?.requireAwaitingUserResume === true &&
       (goal.status === "paused" || goal.status === "budgetLimited" || goal.status === "usageLimited") &&
       !(goal.status === "paused" && goal.stopReason === "awaiting user")) {
-      throw new Error("only an awaiting-user goal can resume without an explicit /goal resume or /resume_goal command")
+      throw new Error("only an awaiting-user goal can resume without an explicit /customgoal resume or /resume_goal command")
     }
     const interruptedResume = status === "active" && goal.status === "cancelled" &&
       goal.stopReason === "interrupted" && options?.allowInterruptedResume === true

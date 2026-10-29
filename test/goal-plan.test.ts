@@ -330,17 +330,17 @@ test("plan operation errors and resulting plan violations are reported together 
 test("a planned objective can only clear its plan with an explicit grant for that goal and exact objective", async () => {
   const goal = await createGoal("session", "Keep the full engine scope")
   await updateGoalPlan("session", { goalID: goal.id, expectedRevision: 0, plan: initialPlan(), reason: "Full scope" })
-  await expect(updateGoalObjective("session", "Only parser")).rejects.toThrow("/goal edit")
+  await expect(updateGoalObjective("session", "Only parser")).rejects.toThrow("/customgoal edit")
   await expect(
     updateGoalObjective("session", "Only parser", "active", {
       requestedPlanEdit: { goalID: "another-goal", objective: "Only parser" },
     }),
-  ).rejects.toThrow("/goal edit")
+  ).rejects.toThrow("/customgoal edit")
   await expect(
     updateGoalObjective("session", "Only parser", "active", {
       requestedPlanEdit: { goalID: goal.id, objective: "Wrong objective" },
     }),
-  ).rejects.toThrow("/goal edit")
+  ).rejects.toThrow("/customgoal edit")
   const edited = await updateGoalObjective("session", "Only parser", "active", {
     requestedPlanEdit: { goalID: goal.id, objective: "Only parser" },
   })

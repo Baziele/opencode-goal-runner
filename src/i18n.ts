@@ -126,8 +126,8 @@ const EN_MESSAGES: GoalMessages = {
       "Pause or resume the current OpenCode goal only when the user explicitly asks, except that the model may " +
       "pause with reason awaiting_user and a concrete blocker when a direct " +
       "user answer or action is required and no independent goal work remains. On the next user turn, resume only " +
-      "if their reply resolves that awaiting_user request. All other pauses require /goal resume or /resume_goal. " +
-      "An interrupted goal requires an explicit /goal resume or /resume_goal; " +
+      "if their reply resolves that awaiting_user request. All other pauses require /customgoal resume or /resume_goal. " +
+      "An interrupted goal requires an explicit /customgoal resume or /resume_goal; " +
       "Plan mode cannot resume a goal.",
     stopGoal:
       "Cancel the current OpenCode goal when the user explicitly asks to stop or cancel it. Cancellation is terminal " +
@@ -153,7 +153,7 @@ const EN_MESSAGES: GoalMessages = {
   notices: {
     planModeCreate:
       "Goal recorded while the session is in Plan mode, so execution is paused. Do not start implementation work " +
-      'now. Ask the user to switch to Build mode and resume the goal (for example with "/goal resume") to begin execution.',
+      'now. Ask the user to switch to Build mode and resume the goal (for example with "/customgoal resume") to begin execution.',
     limitedGoal:
       "Safety limit reached. Do not start or continue substantive work for this goal. Summarize useful progress, " +
       "remaining work, and blockers, then wait for the user to resume or edit the goal.",
@@ -245,7 +245,7 @@ const ZH_CN_MESSAGES: GoalMessages = {
     updateGoal:
       "只有在依据真实证据完成审计后才能关闭现有目标。仅当目标已经达成且没有剩余必需工作时使用 complete，并提供证据；仅当目标无法达成或被阻塞时使用 unmet，并提供阻塞原因。不要仅因为准备停止工作就关闭目标。",
     updateGoalStatus:
-      "仅当用户明确要求时暂停或继续当前 OpenCode 目标；例外是确实需要用户直接回答或操作且没有其他可独立推进的目标工作时，模型可使用 awaiting_user 和具体阻塞说明暂停。用户下一轮明确解决该 awaiting_user 请求后才可继续；其他暂停状态必须使用 /goal resume 或 /resume_goal。中断的目标也必须由用户明确调用这些命令；Plan 模式不能继续目标。",
+      "仅当用户明确要求时暂停或继续当前 OpenCode 目标；例外是确实需要用户直接回答或操作且没有其他可独立推进的目标工作时，模型可使用 awaiting_user 和具体阻塞说明暂停。用户下一轮明确解决该 awaiting_user 请求后才可继续；其他暂停状态必须使用 /customgoal resume 或 /resume_goal。中断的目标也必须由用户明确调用这些命令；Plan 模式不能继续目标。",
     stopGoal: "仅当用户明确要求停止或取消目标时，取消当前 OpenCode 目标。取消是终态，会阻止后续自动继续，并保留目标及其历史。",
     replaceGoal: "仅当用户明确要求替换目标时，原子地取消并归档当前目标，然后在同一会话中创建新的独立目标。",
     clearGoal: "仅当用户明确要求清除目标时，将当前目标从会话中分离并归档；若目标仍在活动，会先取消再清除。",
@@ -263,7 +263,7 @@ const ZH_CN_MESSAGES: GoalMessages = {
   },
   notices: {
     planModeCreate:
-      '目标已在 Plan 模式下记录，因此执行被暂停。现在不要开始实现工作。请让用户切换到 Build 模式并继续目标（例如使用 "/goal resume"）后再开始执行。',
+      '目标已在 Plan 模式下记录，因此执行被暂停。现在不要开始实现工作。请让用户切换到 Build 模式并继续目标（例如使用 "/customgoal resume"）后再开始执行。',
     limitedGoal:
       "已达到安全限制。不要开始或继续此目标的实质性工作。请总结已有进展、剩余工作和阻塞项，然后等待用户继续或编辑目标。",
     duplicateGoal:
